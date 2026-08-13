@@ -8,6 +8,7 @@ from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 from scipy import signal
+from scipy.ndimage import binary_closing
 
 from .blackbox.parser import FlightLogParser
 from .analyze import _convert_column
@@ -90,6 +91,41 @@ def power_spectrum(parser: FlightLogParser, name: str,
     v = v[np.isfinite(v)]
     freqs, psd = _welch(v, fs, max_freq, nperseg)
     return freqs, psd, fs
+
+
+def motor_frequency(parser: FlightLogParser, pole_pairs: int = 7,
+                    harmonics: int = 3) -> Optional[Dict]:
+    """Estimate the motor mechanical frequency (Hz) from the eRPM fields.
+
+    Blackbox stores eRPM as (electrical RPM / 100). For an outrunner motor the
+    mechanical RPM equals the electrical RPM divided by the number of pole
+    pairs (7 for the common 14-pole / N14P motors), and the mechanical
+    frequency is that divided by 60. Returns the base frequency and its first
+    few harmonics, or None when no RPM data is present.
+    """
+    names = parser.frame_defs[ord("I")].field_names
+    erpm_names = [n for n in names if n.startswith("eRPM[")]
+    if not erpm_names:
+        return None
+
+    medians = []
+    for name in erpm_names:
+        v = _field_values(parser, name)
+        v = v[np.isfinite(v)]
+        v = v[v > 0]
+        if v.size:
+            medians.append(float(np.median(v)))
+    if not medians:
+        return None
+
+    erpm_field = float(np.median(medians))          # electrical RPM / 100
+    base_hz = erpm_field * 100.0 / pole_pairs / 60.0
+    if base_hz <= 0:
+        return None
+    return {
+        "base_hz": base_hz,
+        "harmonics_hz": [base_hz * (i + 1) for i in range(harmonics)],
+    }
 
 
 def spectrogram(parser: FlightLogParser, name: str,
@@ -222,7 +258,11 @@ def step_response_analysis(parser: FlightLogParser, threshold: float = 100.0,
             continue
         sp = _field_values(parser, sp_name)
         gy = _field_values(parser, gy_name)
-        steps = _detect_steps(t, sp, gy, fs, threshold, pre, post, max_steps)
+        # yaw is under-actuated on most quads, so its commanded rates are much
+        # lower than roll/pitch; use a proportionally lower step threshold so
+        # low-amplitude yaw steps are still detected.
+        axis_threshold = threshold * 0.5 if axis == 2 else threshold
+        steps = _detect_steps(t, sp, gy, fs, axis_threshold, pre, post, max_steps)
         axes_out.append({"axis": axis, "label": AXIS_LABELS[axis], "steps": steps})
 
     return {"sample_rate": fs, "axes": axes_out}
@@ -235,32 +275,53 @@ def _detect_steps(t: np.ndarray, sp: np.ndarray, gy: np.ndarray, fs: float,
     sp = np.asarray(sp, dtype=np.float64)
     gy = np.asarray(gy, dtype=np.float64)
 
-    # A step edge = a large setpoint change within one sample interval.
-    edges = np.where(np.abs(np.diff(sp)) >= threshold)[0]
-    if edges.size == 0:
-        return []
+    # Betaflight's setpoint is smoothed by RC smoothing, so a "step" is a ramp
+    # rather than a single-sample jump. The setpoint is also stored as int16,
+    # which leaves occasional zero-diff samples inside the ramp; close those
+    # small gaps so a full stick deflection is seen as one contiguous run.
+    d = np.diff(sp)
+    moving = np.abs(d) >= 0.5
+    gap = max(int(0.02 * fs), 10)
+    moving = binary_closing(moving, structure=np.ones(gap))
 
     pre_n = int(pre * fs)
     post_n = int(post * fs)
-    target_n = max(int(0.2 * fs), 4)
+    settle_n = max(int(0.15 * fs), 4)
 
     steps = []
     used_until = -1
-    for e in edges:
+    i = 0
+    while i < sp.size - 1:
+        if not moving[i]:
+            i += 1
+            continue
+
+        # contiguous motion run: setpoint moved from sp[seg_start] to sp[seg_end]
+        seg_start = i
+        while i < sp.size - 1 and moving[i]:
+            i += 1
+        seg_end = i
+
+        # the step edge is where the setpoint changed fastest
+        e = seg_start + int(np.argmax(np.abs(d[seg_start:seg_end])))
         if e < used_until:
             continue
-        start = max(0, e - pre_n)
-        end = min(sp.size, e + 1 + post_n)
-        if end - start < 8:
-            continue
 
-        baseline = float(np.median(sp[start:e])) if e > start else float(sp[e])
-        target = float(np.median(sp[e + 1:min(sp.size, e + 1 + target_n)]))
+        # steady-state levels just before / after the motion run
+        b0 = max(0, seg_start - settle_n)
+        baseline = float(np.median(sp[b0:seg_start])) if seg_start > b0 else float(sp[seg_start])
+        t1 = min(sp.size, seg_end + settle_n)
+        target = float(np.median(sp[seg_end:t1])) if t1 > seg_end else float(sp[seg_end])
         step_mag = target - baseline
-        if abs(step_mag) < 1e-6:
+        if abs(step_mag) < threshold:
             continue
 
-        seg_gy = gy[e + 1:end]
+        win_start = max(0, e - pre_n)
+        win_end = min(sp.size, e + 1 + post_n)
+        if win_end - win_start < 8:
+            continue
+
+        seg_gy = gy[e + 1:win_end]
         if seg_gy.size == 0:
             continue
         if step_mag > 0:
@@ -269,10 +330,10 @@ def _detect_steps(t: np.ndarray, sp: np.ndarray, gy: np.ndarray, fs: float,
             overshoot = float(target - np.min(seg_gy))
         overshoot_pct = overshoot / abs(step_mag) * 100.0
 
-        rise_time = _rise_time(gy[start:end], baseline, target, fs)
+        rise_time = _rise_time(gy[win_start:win_end], baseline, target, fs)
 
         seg_t, seg_sp, seg_gy2 = _decimate(
-            t[start:end] - t[e], sp[start:end], gy[start:end])
+            t[win_start:win_end] - t[e], sp[win_start:win_end], gy[win_start:win_end])
 
         steps.append({
             "t0": float(t[e]),
@@ -281,7 +342,7 @@ def _detect_steps(t: np.ndarray, sp: np.ndarray, gy: np.ndarray, fs: float,
             "rise_time_s": float(rise_time),
             "data": {"t": seg_t, "setpoint": seg_sp, "gyro": seg_gy2},
         })
-        used_until = end
+        used_until = win_end
         if len(steps) >= max_steps:
             break
     return steps

@@ -140,6 +140,7 @@ def spectrum_endpoint(
             "freq": freqs.tolist(),
             "psd": psd.tolist(),
         }
+    result["motor"] = spectrum.motor_frequency(log)
     return result
 
 

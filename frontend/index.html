@@ -184,6 +184,20 @@
   .pid-card .rms small { font-size: 11px; color: var(--text-dim); font-weight: 400; }
   .pid-card .ratio { font-size: 11px; color: var(--text-dim); margin-top: 4px; }
   .pid-card .ratio b { color: var(--text); }
+  .pid-help {
+    display: grid; grid-template-columns: 1fr 1fr 1.45fr; gap: 18px;
+    padding: 12px 16px; border-bottom: 1px solid var(--line-soft);
+    background: var(--panel-2); font-size: 12px; line-height: 1.75;
+  }
+  .pid-help .ph-title { font-size: 11px; font-weight: 700; color: var(--accent); text-transform: uppercase; letter-spacing: .5px; margin-bottom: 6px; }
+  .pid-help .ph-item { color: var(--text-dim); }
+  .pid-help .ph-item b { color: var(--text); font-weight: 600; }
+  .pid-help .ph-eval-line { color: var(--text-dim); }
+  .pid-help .ph-eval-line b { color: var(--text); font-family: var(--mono); }
+  .pid-help .good { color: var(--accent-2); font-weight: 600; }
+  .pid-help .warn { color: var(--warn); font-weight: 600; }
+  .pid-help .bad { color: var(--danger); font-weight: 600; }
+  .pid-help .ph-conclusion { margin-top: 8px; padding: 8px 10px; background: var(--panel); border: 1px solid var(--line); border-radius: 8px; color: var(--text); }
 
   /* ---------- diagnose view ---------- */
   #diagnoseView { display: flex; flex-direction: column; }
@@ -269,7 +283,7 @@
 
     <div class="view-tabs hidden" id="viewTabs">
       <button data-view="time" class="active">时间轴</button>
-      <button data-view="spectrum">频谱</button>
+      <button data-view="spectrum">噪声</button>
       <button data-view="pid">PID 分析</button>
       <button data-view="step">阶跃响应</button>
       <button data-view="diagnose">诊断</button>
@@ -282,13 +296,14 @@
     <div class="chart-wrap hidden" id="spectrumView">
       <div class="spec-bar" id="specBar"></div>
       <div class="spec-grid">
-        <div class="pane"><div class="pane-title">功率谱密度 (PSD)</div><div id="specChart" class="pane-body"></div></div>
+        <div class="pane"><div class="pane-title">噪声频谱 (dB)</div><div id="specChart" class="pane-body"></div></div>
         <div class="pane"><div class="pane-title">时频瀑布图 (STFT)</div><div id="wfChart" class="pane-body"></div></div>
       </div>
     </div>
 
     <div class="chart-wrap hidden" id="pidView">
       <div class="pid-cards" id="pidCards"></div>
+      <div class="pid-help" id="pidHelp"></div>
       <div class="pid-grid">
         <div class="pane"><div class="pane-title">PID error 频谱 (setpoint − gyro)</div><div id="pidErrorChart" class="pane-body"></div></div>
         <div class="pane"><div class="pane-title">mean |error| vs 油门</div><div id="pidEvtChart" class="pane-body"></div></div>
@@ -672,25 +687,29 @@ function renderInfo(s) {
 /* ---------------- spectrum view ---------------- */
 const SPEC_OPTIONS = ["gyroADC[0]", "gyroADC[1]", "gyroADC[2]",
   "gyroUnfilt[0]", "gyroUnfilt[1]", "gyroUnfilt[2]",
+  "axisD[0]", "axisD[1]", "axisD[2]",
   "setpoint[0]", "setpoint[1]", "setpoint[2]"];
-const SPEC_COLOR = { gyroADC: "#4cc2ff", gyroUnfilt: "#7a5cff", setpoint: "#37e29e" };
+const SPEC_COLOR = { gyroADC: "#4cc2ff", gyroUnfilt: "#7a5cff", axisD: "#ff9f43", setpoint: "#37e29e" };
 const AXIS_COLORS = ["#4cc2ff", "#37e29e", "#ff9f43"];
 
 function renderSpecBar(s) {
   const avail = new Set(s.field_names);
-  state.specChannels = SPEC_OPTIONS.filter(n => avail.has(n)).slice(0, 6);
+  const all = SPEC_OPTIONS.filter(n => avail.has(n));
+  // 默认选中 gyro（滤波前 raw + 滤波后 filtered），这是噪声分析的核心
+  state.specChannels = all.filter(n => n.startsWith("gyroADC") || n.startsWith("gyroUnfilt")).slice(0, 6);
   const bar = $("specBar");
   bar.innerHTML = "";
-  state.specChannels.forEach(name => {
+  all.forEach(name => {
     const key = name.replace(/\[\d+\]/, "");
+    const on = state.specChannels.includes(name);
     const tag = document.createElement("span");
-    tag.className = "chip-tag on";
+    tag.className = "chip-tag" + (on ? " on" : "");
     tag.dataset.name = name;
     tag.style.setProperty("--cc", SPEC_COLOR[key] || "#4cc2ff");
     tag.textContent = name;
     tag.addEventListener("click", () => {
-      const on = tag.classList.toggle("on");
-      if (on) { if (!state.specChannels.includes(name)) state.specChannels.push(name); }
+      const isOn = tag.classList.toggle("on");
+      if (isOn) { if (!state.specChannels.includes(name)) state.specChannels.push(name); }
       else state.specChannels = state.specChannels.filter(x => x !== name);
       loadSpectrum();
     });
@@ -706,7 +725,7 @@ async function loadSpectrum() {
     const resp = await fetch(`/api/decode/${s.id}/spectrum?names=${encodeURIComponent(state.specChannels.join(","))}`);
     const body = await resp.json();
     if (!resp.ok) throw new Error(body.detail);
-    renderSpecChart(body.series);
+    renderSpecChart(body.series, body.motor);
   } catch (err) { console.error(err); }
   loadWaterfall();
 }
@@ -725,7 +744,7 @@ async function loadWaterfall() {
   } catch (err) { console.error(err); }
 }
 
-function renderSpecChart(seriesMap) {
+function renderSpecChart(seriesMap, motor) {
   if (!state.specChart) state.specChart = echarts.init($("specChart"));
   const series = [];
   for (const name of state.specChannels) {
@@ -733,20 +752,31 @@ function renderSpecChart(seriesMap) {
     if (!info || !info.freq || !info.freq.length) continue;
     const key = name.replace(/\[\d+\]/, "");
     const color = SPEC_COLOR[key] || "#ff9f43";
-    const data = info.freq.map((f, i) => [f, Math.max(info.psd[i], 1e-12)]);
+    const data = info.freq.map((f, i) => [f, 10 * Math.log10(Math.max(info.psd[i], 1e-12))]);
     series.push({ name, type: "line", showSymbol: false, data,
       lineStyle: { width: 1.4, color }, itemStyle: { color } });
   }
+
+  // 在频谱图上标注电机基频及其谐波（基于 eRPM 估算）
+  if (series.length && motor && motor.harmonics_hz && motor.harmonics_hz.length) {
+    series[0].markLine = {
+      silent: true, symbol: "none",
+      label: { show: true, formatter: "{b}", color: "#ff9f43", fontSize: 9 },
+      lineStyle: { color: "rgba(255,159,67,.65)", type: "dashed", width: 1 },
+      data: motor.harmonics_hz.map((hz, i) => ({ xAxis: hz, name: `电机${i + 1}x` })),
+    };
+  }
+
   state.specChart.setOption({
     animation: false, backgroundColor: "transparent",
     grid: { left: 60, right: 20, top: 28, bottom: 36 },
     tooltip: { trigger: "axis", backgroundColor: "#0d1524", borderColor: "#22304a",
-      textStyle: { color: "#d7e2f1", fontSize: 11 }, valueFormatter: v => v == null ? "-" : (+v).toExponential(2) },
+      textStyle: { color: "#d7e2f1", fontSize: 11 }, valueFormatter: v => v == null ? "-" : (+v).toFixed(1) + " dB" },
     legend: { show: true, top: 0, textStyle: { color: "#7e8aa5", fontSize: 10 } },
     xAxis: { type: "value", name: "频率 (Hz)", min: 0,
       nameTextStyle: { color: "#7e8aa5", fontSize: 10 }, axisLabel: { color: "#7e8aa5", fontSize: 10 },
       axisLine: { lineStyle: { color: "#22304a" } }, splitLine: { lineStyle: { color: "rgba(30,42,61,.5)" } } },
-    yAxis: { type: "log", name: "PSD (deg/s)²/Hz",
+    yAxis: { type: "value", name: "PSD (dB)",
       nameTextStyle: { color: "#7e8aa5", fontSize: 10 }, axisLabel: { color: "#7e8aa5", fontSize: 10 },
       axisLine: { lineStyle: { color: "#22304a" } }, splitLine: { lineStyle: { color: "rgba(30,42,61,.5)" } } },
     series,
@@ -796,6 +826,7 @@ async function loadPidError() {
 }
 
 function renderPidError(pe) {
+  renderPidHelp(pe);
   const cards = $("pidCards");
   cards.innerHTML = "";
   pe.axes.forEach((ax, i) => {
@@ -810,6 +841,56 @@ function renderPidError(pe) {
   });
   renderPidErrorChart(pe);
   renderPidEvtChart(pe);
+}
+
+function renderPidHelp(pe) {
+  const help = $("pidHelp");
+  if (!help || !pe.axes || !pe.axes.length) return;
+
+  const axes = pe.axes;
+  const evalLines = axes.map(ax => {
+    const rms = ax.rms_error_deg_s;
+    const r = ax.propwash_ratio;
+    const rmsTxt = rms < 5 ? "优秀" : rms < 15 ? "良好" : rms < 30 ? "一般" : "偏差";
+    const rmsCls = rms < 15 ? "good" : rms < 30 ? "warn" : "bad";
+    const pwTxt = r < 0.20 ? "良好" : r < 0.35 ? "中等" : "偏高";
+    const pwCls = r < 0.20 ? "good" : r < 0.35 ? "warn" : "bad";
+    const color = AXIS_COLORS[ax.axis] || "#4cc2ff";
+    return `<div class="ph-eval-line"><b style="color:${color}">${ax.label}</b>：RMS ${rms.toFixed(1)} deg/s（<span class="${rmsCls}">${rmsTxt}</span>），propwash 占比 ${(r * 100).toFixed(1)}%（<span class="${pwCls}">${pwTxt}</span>）</div>`;
+  }).join("");
+
+  const maxRms = Math.max(...axes.map(a => a.rms_error_deg_s));
+  const maxPw = Math.max(...axes.map(a => a.propwash_ratio));
+  let conclusion;
+  if (maxRms < 15 && maxPw < 0.20) {
+    conclusion = "整体跟踪精度良好，propwash 控制得当，PID 状态健康。";
+  } else if (maxPw >= 0.35) {
+    conclusion = "存在较明显的 propwash（洗流振荡），建议查看诊断页提升 D 增益，或检查桨叶/机架。";
+  } else if (maxRms >= 30) {
+    conclusion = "跟踪误差偏大，建议查看诊断页调整 P 增益与滤波。";
+  } else {
+    conclusion = "整体尚可，但部分轴的洗流或误差偏高，建议结合诊断页进一步微调。";
+  }
+
+  help.innerHTML = `
+    <div class="ph-col">
+      <div class="ph-title">指标含义</div>
+      <div class="ph-item"><b>PID error</b> = setpoint（期望角速度）− gyro（实测角速度），即飞机对指令的跟踪误差。</div>
+      <div class="ph-item"><b>RMS error</b>：误差的均方根，数值越小代表跟踪越精准。</div>
+      <div class="ph-item"><b>propwash 占比</b>：30–90 Hz 洗流振荡能量占 10–150 Hz 噪声带的比例。</div>
+      <div class="ph-item"><b>error vs 油门</b>：不同油门下的平均跟踪误差，用于发现与转速相关的振动。</div>
+    </div>
+    <div class="ph-col">
+      <div class="ph-title">好指标参考</div>
+      <div class="ph-item">RMS error &lt; 15 deg/s 为良好（&lt; 5 优秀，&gt; 30 偏差）。</div>
+      <div class="ph-item">propwash 占比 &lt; 20% 为良好，&gt; 35% 需重点关注。</div>
+      <div class="ph-item">error 随油门应保持平缓；若随油门明显上升，提示桨叶/电机不平衡或振动噪声。</div>
+    </div>
+    <div class="ph-col">
+      <div class="ph-title">本日志评价</div>
+      ${evalLines}
+      <div class="ph-conclusion">${conclusion}</div>
+    </div>`;
 }
 
 function renderPidErrorChart(pe) {
