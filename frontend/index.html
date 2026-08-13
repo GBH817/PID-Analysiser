@@ -1,0 +1,1015 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>PID Analysiser · 黑匣子分析</title>
+<style>
+  :root {
+    --bg: #0a0e17;
+    --panel: #121827;
+    --panel-2: #0f1521;
+    --line: #1e2a3d;
+    --line-soft: #182236;
+    --text: #d7e2f1;
+    --text-dim: #7e8aa5;
+    --accent: #4cc2ff;
+    --accent-2: #37e29e;
+    --warn: #ff9f43;
+    --danger: #ff5d73;
+    --radius: 12px;
+    --mono: "Consolas", "JetBrains Mono", monospace;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body { height: 100%; }
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+    font-size: 13px;
+    overflow: hidden;
+  }
+  ::-webkit-scrollbar { width: 8px; height: 8px; }
+  ::-webkit-scrollbar-thumb { background: #22304a; border-radius: 4px; }
+  ::-webkit-scrollbar-track { background: transparent; }
+
+  /* ---------- top bar ---------- */
+  .topbar {
+    height: 52px;
+    display: flex;
+    align-items: center;
+    gap: 14px;
+    padding: 0 18px;
+    background: linear-gradient(180deg, #101828, #0d1420);
+    border-bottom: 1px solid var(--line);
+  }
+  .logo {
+    display: flex; align-items: center; gap: 10px;
+    font-size: 15px; font-weight: 700; letter-spacing: .3px;
+  }
+  .logo .mark {
+    width: 26px; height: 26px; border-radius: 7px;
+    background: conic-gradient(from 210deg, #4cc2ff, #37e29e, #ff9f43, #4cc2ff);
+    display: grid; place-items: center;
+    font-size: 13px; color: #06111f; font-weight: 800;
+    box-shadow: 0 0 14px rgba(76,194,255,.35);
+  }
+  .topbar .sep { width: 1px; height: 22px; background: var(--line); }
+  .topbar .sub { color: var(--text-dim); font-size: 12px; }
+  .topbar .spacer { flex: 1; }
+  .chip {
+    padding: 4px 12px; border-radius: 20px; font-size: 12px;
+    background: #16233a; color: var(--text-dim); border: 1px solid var(--line);
+    display: flex; align-items: center; gap: 6px;
+  }
+  .chip .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--text-dim); }
+  .chip.ready .dot { background: var(--accent-2); box-shadow: 0 0 6px var(--accent-2); }
+  .chip.ready { color: var(--text); border-color: #274a4a; }
+
+  /* ---------- layout ---------- */
+  .main { display: flex; height: calc(100% - 52px); }
+  .sidebar {
+    width: 264px; min-width: 264px;
+    border-right: 1px solid var(--line);
+    background: var(--panel-2);
+    display: flex; flex-direction: column;
+  }
+  .content { flex: 1; display: flex; flex-direction: column; min-width: 0; }
+
+  /* ---------- sidebar: tabs ---------- */
+  .side-tabs { display: flex; border-bottom: 1px solid var(--line); }
+  .side-tabs button {
+    flex: 1; padding: 11px 0; background: none; border: none; cursor: pointer;
+    color: var(--text-dim); font-size: 13px; font-weight: 600;
+    border-bottom: 2px solid transparent;
+  }
+  .side-tabs button.active { color: var(--accent); border-bottom-color: var(--accent); }
+  .side-tabs button:hover { color: var(--text); }
+
+  /* ---------- channel panel ---------- */
+  .chan-body { flex: 1; overflow-y: auto; padding: 10px 8px 16px; }
+  .group { margin-bottom: 8px; }
+  .group-title {
+    display: flex; align-items: center; gap: 8px;
+    font-size: 11px; font-weight: 700; color: var(--text-dim);
+    text-transform: uppercase; letter-spacing: .8px;
+    padding: 6px 10px 4px; cursor: pointer; user-select: none;
+  }
+  .group-title .bar { width: 3px; height: 12px; border-radius: 2px; background: var(--gc, var(--accent)); }
+  .group-title .cnt { margin-left: auto; color: var(--text-dim); font-weight: 400; }
+  .chan {
+    display: flex; align-items: center; gap: 9px;
+    padding: 5px 12px; border-radius: 8px; cursor: pointer;
+    color: var(--text-dim); transition: background .12s, color .12s;
+  }
+  .chan:hover { background: #182440; color: var(--text); }
+  .chan.on { background: #16243d; color: var(--text); }
+  .chan .sw {
+    width: 15px; height: 15px; border-radius: 5px; border: 1.5px solid #33415e;
+    display: grid; place-items: center; font-size: 9px; color: transparent;
+    transition: all .12s; flex-shrink: 0;
+  }
+  .chan.on .sw { border-color: var(--cc, var(--accent)); background: var(--cc, var(--accent)); color: #06111f; }
+  .chan .nm { font-family: var(--mono); font-size: 12px; }
+  .chan .un { margin-left: auto; font-size: 10px; color: var(--text-dim); }
+
+  /* ---------- empty / upload ---------- */
+  .empty {
+    flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center;
+    gap: 14px; padding: 30px;
+  }
+  .dropzone {
+    width: min(480px, 90%); padding: 52px 30px; border-radius: var(--radius);
+    border: 1.5px dashed #2c3b5c; background: var(--panel);
+    text-align: center; cursor: pointer; transition: all .18s;
+    position: relative; overflow: hidden;
+  }
+  .dropzone::before {
+    content: ""; position: absolute; inset: -2px; border-radius: inherit;
+    background: conic-gradient(from var(--a,0deg), transparent 0 60%, rgba(76,194,255,.18) 60% 80%, transparent 80%);
+    opacity: 0; transition: opacity .2s; z-index: 0;
+  }
+  .dropzone:hover, .dropzone.over { border-color: var(--accent); background: #13203a; }
+  .dropzone .icon {
+    width: 56px; height: 56px; margin: 0 auto 16px; border-radius: 16px;
+    background: linear-gradient(160deg, #15284a, #122038);
+    display: grid; place-items: center; font-size: 26px; color: var(--accent);
+    border: 1px solid #24406b;
+  }
+  .dropzone .t1 { font-size: 15px; font-weight: 600; }
+  .dropzone .t2 { color: var(--text-dim); margin-top: 6px; font-size: 12px; line-height: 1.7; }
+  .dropzone .t3 { margin-top: 14px; display: inline-block; font-size: 12px; padding: 7px 18px; border-radius: 20px;
+    background: linear-gradient(90deg, #1c4f9e, #1b8fb8); color: #fff; font-weight: 600; }
+  .hint { color: var(--text-dim); font-size: 12px; }
+
+  /* ---------- loading overlay ---------- */
+  .overlay {
+    position: absolute; inset: 0; z-index: 50;
+    background: rgba(8,12,20,.72); backdrop-filter: blur(4px);
+    display: none; flex-direction: column; align-items: center; justify-content: center; gap: 18px;
+  }
+  .overlay.show { display: flex; }
+  .spinner {
+    width: 46px; height: 46px; border-radius: 50%;
+    border: 3px solid #1c2a44; border-top-color: var(--accent);
+    animation: spin 1s linear infinite;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  .overlay .msg { font-size: 14px; }
+  .overlay .msg small { display: block; color: var(--text-dim); margin-top: 6px; font-size: 12px; }
+
+  /* ---------- chart area ---------- */
+  .chart-wrap { position: relative; flex: 1; min-height: 0; }
+  #chart { width: 100%; height: 100%; }
+
+  /* ---------- view tabs ---------- */
+  .view-tabs { display: flex; gap: 6px; padding: 8px 14px; border-bottom: 1px solid var(--line); background: var(--panel-2); }
+  .view-tabs button { padding: 6px 16px; border-radius: 8px; background: none; border: 1px solid transparent; cursor: pointer; color: var(--text-dim); font-size: 13px; font-weight: 600; }
+  .view-tabs button.active { background: #16243d; color: var(--accent); border-color: #274a5e; }
+  .view-tabs button:hover { color: var(--text); }
+
+  /* ---------- spectrum / pid panes ---------- */
+  #spectrumView, #pidView, #stepView { display: flex; flex-direction: column; }
+  .spec-bar { display: flex; flex-wrap: wrap; gap: 6px; padding: 10px 14px; border-bottom: 1px solid var(--line-soft); background: var(--panel-2); }
+  .chip-tag { padding: 4px 12px; border-radius: 16px; font-size: 12px; cursor: pointer; background: #16233a; color: var(--text-dim); border: 1px solid var(--line); font-family: var(--mono); transition: all .12s; }
+  .chip-tag.on { color: var(--text); border-color: var(--cc, var(--accent)); background: #1a2a45; }
+  .spec-grid, .pid-grid, .step-grid { display: flex; flex-direction: column; flex: 1; min-height: 0; gap: 1px; background: var(--line-soft); }
+  .pane { flex: 1; min-height: 0; display: flex; flex-direction: column; background: var(--bg); }
+  .pane-title { padding: 7px 14px; font-size: 11px; color: var(--text-dim); font-weight: 700; letter-spacing: .5px; text-transform: uppercase; border-bottom: 1px solid var(--line-soft); background: var(--panel-2); }
+  .pane-body { flex: 1; min-height: 0; }
+  .pid-cards { display: flex; gap: 10px; padding: 12px 14px; border-bottom: 1px solid var(--line-soft); background: var(--panel-2); }
+  .pid-card { flex: 1; background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 10px 14px; }
+  .pid-card .axis { font-size: 11px; color: var(--text-dim); text-transform: uppercase; letter-spacing: .6px; }
+  .pid-card .rms { font-size: 20px; font-weight: 700; font-family: var(--mono); margin-top: 2px; }
+  .pid-card .rms small { font-size: 11px; color: var(--text-dim); font-weight: 400; }
+  .pid-card .ratio { font-size: 11px; color: var(--text-dim); margin-top: 4px; }
+  .pid-card .ratio b { color: var(--text); }
+
+  /* ---------- diagnose view ---------- */
+  #diagnoseView { display: flex; flex-direction: column; }
+  .diag-body { flex: 1; overflow-y: auto; padding: 18px 22px; display: flex; flex-direction: column; gap: 14px; }
+  .diag-empty { color: var(--text-dim); text-align: center; padding: 60px 20px; font-size: 14px; }
+  .diag-card { background: var(--panel); border: 1px solid var(--line); border-left: 3px solid var(--sev-color, var(--accent)); border-radius: 10px; padding: 14px 16px; }
+  .diag-card .head { display: flex; align-items: center; gap: 10px; }
+  .diag-card .sev { padding: 2px 10px; border-radius: 12px; font-size: 10px; font-weight: 700; letter-spacing: .5px; text-transform: uppercase; color: #06111f; }
+  .diag-card .title { font-size: 14px; font-weight: 700; }
+  .diag-card .axis-tag { margin-left: auto; font-size: 11px; color: var(--text-dim); font-family: var(--mono); }
+  .diag-card .detail { margin-top: 8px; color: var(--text-dim); font-size: 12px; line-height: 1.7; }
+  .diag-card .action { margin-top: 10px; color: var(--text); font-size: 12px; line-height: 1.6; }
+  .diag-card .action b { color: var(--accent-2); }
+  .diag-card .cli { margin-top: 10px; }
+  .diag-card .cli-line { font-family: var(--mono); font-size: 12px; color: #ffd166; background: #0d1524; border: 1px solid var(--line); border-radius: 6px; padding: 5px 10px; margin-top: 5px; word-break: break-all; }
+  .diag-summary { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 12px 16px; }
+  .diag-summary .ds-title { font-size: 11px; color: var(--text-dim); font-weight: 700; text-transform: uppercase; letter-spacing: .5px; margin-bottom: 8px; }
+  .diag-summary .ds-row { display: flex; flex-wrap: wrap; gap: 16px; font-family: var(--mono); font-size: 12px; color: var(--text); }
+  .diag-summary .ds-row b { color: var(--accent); font-weight: 600; }
+  .diag-summary .ds-dim { color: var(--text-dim); }
+
+
+
+  /* ---------- info tab ---------- */
+  .info { flex: 1; overflow-y: auto; padding: 18px 22px; }
+  .info h3 { font-size: 13px; color: var(--accent); margin: 18px 0 10px; letter-spacing: .5px; }
+  .info h3:first-child { margin-top: 0; }
+  .kv { display: grid; grid-template-columns: repeat(auto-fill, minmax(250px, 1fr)); gap: 8px; }
+  .kv .item {
+    background: var(--panel); border: 1px solid var(--line); border-radius: 9px;
+    padding: 9px 12px; display: flex; justify-content: space-between; gap: 10px;
+  }
+  .kv .k { color: var(--text-dim); }
+  .kv .v { font-family: var(--mono); color: var(--text); text-align: right; }
+  .kv .v.good { color: var(--accent-2); }
+  .kv .v.warn { color: var(--warn); }
+
+  /* ---------- bottom bar ---------- */
+  .statusbar {
+    height: 30px; display: flex; align-items: center; gap: 18px;
+    padding: 0 14px; border-top: 1px solid var(--line);
+    background: var(--panel-2); color: var(--text-dim); font-size: 11px;
+    font-family: var(--mono);
+  }
+  .statusbar .spacer { flex: 1; }
+
+  .hidden { display: none !important; }
+</style>
+</head>
+<body>
+
+<div class="topbar">
+  <div class="logo">
+    <div class="mark">P</div>
+    <span>PID Analysiser</span>
+  </div>
+  <div class="sep"></div>
+  <div class="sub">Betaflight 黑匣子（.bbl）解码与分析</div>
+  <div class="spacer"></div>
+  <div class="chip" id="chipFile">未加载日志</div>
+</div>
+
+<div class="main">
+  <div class="sidebar">
+    <div class="side-tabs">
+      <button id="tab-channels" class="active">通道</button>
+      <button id="tab-info">信息</button>
+    </div>
+    <div id="panel-channels" class="chan-body"></div>
+    <div id="panel-info" class="info hidden"></div>
+  </div>
+
+  <div class="content">
+    <div class="empty" id="emptyView">
+      <div class="dropzone" id="dropzone">
+        <div class="icon">⛵</div>
+        <div class="t1">拖拽黑匣子日志到这里</div>
+        <div class="t2">支持 Betaflight 导出的 .bbl / .txt 黑匣子文件<br>解析陀螺仪、PID、电机、电压等全部通道</div>
+        <div class="t3" id="pickBtn">选择文件</div>
+      </div>
+      <div class="hint">也可直接点击上方选择 .bbl 文件</div>
+    </div>
+
+    <div class="view-tabs hidden" id="viewTabs">
+      <button data-view="time" class="active">时间轴</button>
+      <button data-view="spectrum">频谱</button>
+      <button data-view="pid">PID 分析</button>
+      <button data-view="step">阶跃响应</button>
+      <button data-view="diagnose">诊断</button>
+    </div>
+
+    <div class="chart-wrap hidden" id="chartView">
+      <div id="chart"></div>
+    </div>
+
+    <div class="chart-wrap hidden" id="spectrumView">
+      <div class="spec-bar" id="specBar"></div>
+      <div class="spec-grid">
+        <div class="pane"><div class="pane-title">功率谱密度 (PSD)</div><div id="specChart" class="pane-body"></div></div>
+        <div class="pane"><div class="pane-title">时频瀑布图 (STFT)</div><div id="wfChart" class="pane-body"></div></div>
+      </div>
+    </div>
+
+    <div class="chart-wrap hidden" id="pidView">
+      <div class="pid-cards" id="pidCards"></div>
+      <div class="pid-grid">
+        <div class="pane"><div class="pane-title">PID error 频谱 (setpoint − gyro)</div><div id="pidErrorChart" class="pane-body"></div></div>
+        <div class="pane"><div class="pane-title">mean |error| vs 油门</div><div id="pidEvtChart" class="pane-body"></div></div>
+      </div>
+    </div>
+
+    <div class="chart-wrap hidden" id="diagnoseView">
+      <div class="diag-body" id="diagBody"></div>
+    </div>
+
+    <div class="chart-wrap hidden" id="stepView">
+      <div class="spec-bar" id="stepBar"></div>
+      <div class="step-grid">
+        <div class="pane"><div class="pane-title" id="stepTitle">阶跃响应</div><div id="stepChart" class="pane-body"></div></div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="statusbar">
+  <span id="stFrames">—</span>
+  <span id="stDur">—</span>
+  <span id="stFc">—</span>
+  <span class="spacer"></span>
+  <span id="stCorrupt">损坏帧 —</span>
+</div>
+
+<div class="overlay" id="overlay">
+  <div class="spinner"></div>
+  <div class="msg">正在解析黑匣子数据…<small id="ovSub">大日志可能需要一点时间</small></div>
+</div>
+
+<input type="file" id="fileInput" accept=".bbl,.txt,.log,application/octet-stream" style="display:none">
+
+<script src="https://registry.npmmirror.com/echarts/5.5.1/files/dist/echarts.min.js"
+        onerror="this.onerror=null;this.src='https://cdn.jsdelivr.net/npm/echarts@5.5.1/dist/echarts.min.js'"></script>
+<script>
+"use strict";
+
+/* ---------------- channel metadata ---------------- */
+const GROUPS = [
+  { key: "gyro",  label: "陀螺仪 / 角速度",  colors: ["#4cc2ff", "#4f8fff", "#7a5cff"], match: /^gyro/ },
+  { key: "setpoint", label: "期望值 setpoint", colors: ["#37e29e"], match: /^setpoint/ },
+  { key: "pid",   label: "PID 输出",          colors: ["#ff9f43", "#4f8fff", "#ff5d73", "#c06bff"], match: /^axis/ },
+  { key: "rc",    label: "遥控 rcCommand",    colors: ["#ffd166"], match: /^rcCommand/ },
+  { key: "motor", label: "电机输出",          colors: ["#37e29e"], match: /^motor/ },
+  { key: "power", label: "电源",              colors: ["#ff5d73", "#ff8fb3"], match: /^vbat|^amperage/ },
+  { key: "acc",   label: "加速度计",          colors: ["#9aa7bd"], match: /^accSmooth/ },
+  { key: "erpm",  label: "eRPM",              colors: ["#c06bff"], match: /^eRPM/ },
+];
+
+/* y-axis per unit */
+const UNIT_AXIS = { "deg/s": 0, "raw": 0, "us": 1, "V": 2, "A": 3, "g": 4, "rpm": 5, "": 0 };
+const AXIS_STYLE = [
+  { name: "deg/s", pos: "left"  },
+  { name: "us",    pos: "right" },
+  { name: "V",     pos: "right", offset: 0 },
+  { name: "A",     pos: "right", offset: 0 },
+  { name: "g",     pos: "right", offset: 0 },
+  { name: "rpm",   pos: "right", offset: 0 },
+];
+
+const state = { sid: null, summary: null, fields: [], selected: [], chart: null,
+  view: "time", specChannels: [], specChart: null, wfChart: null,
+  pidChart: null, pidEvtChart: null, specLoaded: false, pidLoaded: false, diagLoaded: false,
+  stepLoaded: false, stepChart: null, stepAxis: 0, stepData: null };
+
+/* ---------------- bootstrap ---------------- */
+const $ = (id) => document.getElementById(id);
+const ALL_CHARTS = () => [state.chart, state.specChart, state.wfChart, state.pidChart, state.pidEvtChart, state.stepChart];
+window.addEventListener("resize", () => ALL_CHARTS().forEach(c => c && c.resize()));
+
+["dragenter", "dragover"].forEach(ev => window.addEventListener(ev, e => { e.preventDefault(); $("dropzone").classList.add("over"); }));
+["dragleave", "drop"].forEach(ev => window.addEventListener(ev, e => { e.preventDefault(); $("dropzone").classList.remove("over"); }));
+window.addEventListener("drop", e => {
+  if (e.dataTransfer && e.dataTransfer.files.length) handleFiles(e.dataTransfer.files);
+});
+
+$("dropzone").addEventListener("click", () => $("fileInput").click());
+$("pickBtn").addEventListener("click", e => { e.stopPropagation(); $("fileInput").click(); });
+$("fileInput").addEventListener("change", e => { if (e.target.files.length) handleFiles(e.target.files); e.target.value = ""; });
+
+$("tab-channels").addEventListener("click", () => switchTab("channels"));
+$("tab-info").addEventListener("click", () => switchTab("info"));
+document.querySelectorAll(".view-tabs button").forEach(b =>
+  b.addEventListener("click", () => switchView(b.dataset.view)));
+
+function switchTab(tab) {
+  $("tab-channels").classList.toggle("active", tab === "channels");
+  $("tab-info").classList.toggle("active", tab === "info");
+  $("panel-channels").classList.toggle("hidden", tab !== "channels");
+  $("panel-info").classList.toggle("hidden", tab !== "info");
+}
+
+function switchView(v) {
+  state.view = v;
+  document.querySelectorAll(".view-tabs button").forEach(b =>
+    b.classList.toggle("active", b.dataset.view === v));
+  $("chartView").classList.toggle("hidden", v !== "time");
+  $("spectrumView").classList.toggle("hidden", v !== "spectrum");
+  $("pidView").classList.toggle("hidden", v !== "pid");
+  $("diagnoseView").classList.toggle("hidden", v !== "diagnose");
+  $("stepView").classList.toggle("hidden", v !== "step");
+  if (v === "spectrum" && !state.specLoaded) loadSpectrum();
+  if (v === "pid" && !state.pidLoaded) loadPidError();
+  if (v === "diagnose" && !state.diagLoaded) loadDiagnose();
+  if (v === "step" && !state.stepLoaded) loadStepResponse();
+  setTimeout(() => ALL_CHARTS().forEach(c => c && c.resize()), 60);
+}
+
+/* ---------------- upload & decode ---------------- */
+async function handleFiles(files) {
+  const file = [...files].find(f => /\.(bbl|txt|log)$/i.test(f.name)) || files[0];
+  if (!file) return;
+  $("overlay").classList.add("show");
+  $("ovSub").textContent = file.name + "  ·  " + (file.size / 1048576).toFixed(1) + " MB";
+  try {
+    const form = new FormData();
+    form.append("file", file);
+    const resp = await fetch("/api/decode", { method: "POST", body: form });
+    const body = await resp.json();
+    if (!resp.ok) throw new Error(body.detail || resp.statusText);
+    const log = body.logs[0];
+    state.sid = log.id;
+    state.summary = log;
+    onLogLoaded(log);
+  } catch (err) {
+    alert("解析失败：" + err.message);
+  } finally {
+    $("overlay").classList.remove("show");
+  }
+}
+
+function onLogLoaded(s) {
+  $("emptyView").classList.add("hidden");
+  $("viewTabs").classList.remove("hidden");
+  $("chartView").classList.remove("hidden");
+  $("chipFile").textContent = s.name;
+  $("chipFile").classList.add("ready");
+  $("stFrames").textContent = s.n_main_frames.toLocaleString() + " 帧";
+  const dur = (s.duration_us || 0) / 1e6;
+  $("stDur").textContent = "时长 " + dur.toFixed(1) + " s";
+  $("stFc").textContent = "Betaflight " + (s.fc_version || "?");
+  $("stCorrupt").textContent = "损坏帧 " + s.total_corrupt_frames;
+
+  state.specLoaded = false;
+  state.pidLoaded = false;
+  state.diagLoaded = false;
+  state.stepLoaded = false;
+  renderChannelList(s);
+  renderInfo(s);
+  renderSpecBar(s);
+  state.selected = defaultSelection(s);
+  applySelection(s);
+  switchView("time");
+}
+
+function defaultSelection(s) {
+  const want = ["gyroADC[0]", "gyroADC[1]", "gyroADC[2]",
+                "setpoint[0]", "setpoint[1]", "setpoint[2]",
+                "axisP[0]", "axisP[1]", "axisP[2]",
+                "rcCommand[3]", "motor[0]", "vbatLatest"];
+  const avail = new Set(s.field_names);
+  return want.filter(n => avail.has(n)).slice(0, 10);
+}
+
+/* ---------------- channel list ---------------- */
+function renderChannelList(s) {
+  const box = $("panel-channels");
+  box.innerHTML = "";
+  const grouped = s.field_names.filter(n => n !== "time" && n !== "loopIteration");
+  for (const g of GROUPS) {
+    const names = grouped.filter(n => g.match.test(n));
+    if (!names.length) continue;
+    const colors = g.colors;
+    const el = document.createElement("div");
+    el.className = "group";
+    el.innerHTML = `<div class="group-title" style="--gc:${colors[0]}">
+        <span class="bar"></span>${g.label}<span class="cnt">${names.length}</span></div>`;
+    const body = document.createElement("div");
+    names.forEach((name, i) => {
+      const color = colors[Math.min(i, colors.length - 1)];
+      const row = document.createElement("div");
+      row.className = "chan";
+      row.dataset.name = name;
+      row.innerHTML = `<span class="sw"></span><span class="nm">${name}</span><span class="un">${unitOf(name)}</span>`;
+      row.style.setProperty("--cc", color);
+      row.addEventListener("click", () => toggleChannel(row));
+      body.appendChild(row);
+    });
+    el.appendChild(body);
+    box.appendChild(el);
+  }
+}
+
+function unitOf(name) {
+  return (state.fieldsMap && state.fieldsMap[name]) || guessUnit(name);
+}
+function guessUnit(n) {
+  if (n.startsWith("gyro") || n.startsWith("setpoint") || n.startsWith("axisP") || n.startsWith("axisD") || n.startsWith("axisF")) return "deg/s";
+  if (n.startsWith("axisI")) return "raw";
+  if (n.startsWith("rcCommand") || n.startsWith("motor")) return "us";
+  if (n === "vbatLatest") return "V";
+  if (n === "amperageLatest") return "A";
+  if (n.startsWith("accSmooth")) return "g";
+  if (n.startsWith("eRPM")) return "rpm";
+  return "raw";
+}
+
+function toggleChannel(row) {
+  const name = row.dataset.name;
+  const idx = state.selected.indexOf(name);
+  if (idx >= 0) state.selected.splice(idx, 1);
+  else state.selected.push(name);
+  applySelection(state.summary);
+}
+
+function applySelection(s) {
+  document.querySelectorAll(".chan").forEach(r => {
+    r.classList.toggle("on", state.selected.includes(r.dataset.name));
+  });
+  if (state.selected.length === 0) return;
+  fetchChannels(s, state.selected);
+}
+
+async function fetchChannels(s, names) {
+  try {
+    const resp = await fetch(`/api/decode/${s.id}/channels?names=${encodeURIComponent(names.join(","))}&max_points=4000`);
+    const body = await resp.json();
+    if (!resp.ok) throw new Error(body.detail);
+    if (!state.summary || state.summary.id !== s.id) return; // stale
+    renderChart(body.channels);
+  } catch (err) {
+    console.error(err);
+  }
+}
+
+/* ---------------- chart ---------------- */
+function renderChart(channels) {
+  if (!state.chart) state.chart = echarts.init($("chart"));
+  const colorOf = {};
+  const sel = state.selected;
+  sel.forEach((name, i) => {
+    const g = GROUPS.find(x => x.match.test(name));
+    const colors = g ? g.colors : ["#4cc2ff"];
+    const base = colors[Math.min(i % colors.length, colors.length - 1)];
+    const variants = [base, shade(base, 0.75), shade(base, 1.3)];
+    colorOf[name] = variants[i % variants.length];
+  });
+
+  const series = [];
+  const axes = {};
+  for (const name of sel) {
+    const info = channels[name];
+    if (!info) continue;
+    const u = info.unit || guessUnit(name);
+    const ai = UNIT_AXIS[u] !== undefined ? UNIT_AXIS[u] : 0;
+    axes[ai] = axes[ai] || { name: AXIS_STYLE[ai].name, pos: AXIS_STYLE[ai].pos, used: 0 };
+    axes[ai].used++;
+    series.push({
+      name, type: "line", showSymbol: false, data: info.data, sampling: "lttb",
+      yAxisIndex: ai, lineStyle: { width: 1.1, color: colorOf[name] },
+      itemStyle: { color: colorOf[name] },
+    });
+  }
+
+  const axisKeys = Object.keys(axes);
+  const nRight = axisKeys.filter(k => axes[k].pos === "right").length;
+  let rightIdx = 0;
+  const yAxes = axisKeys.map(k => {
+    const a = axes[k];
+    const isRight = a.pos === "right";
+    const offset = isRight ? rightIdx++ * 56 : 0;
+    return {
+      type: "value", name: a.name, position: a.pos, offset,
+      splitNumber: 4, nameGap: isRight ? 10 : 12,
+      nameTextStyle: { color: "#7e8aa5", fontSize: 10 },
+      axisLabel: { color: "#7e8aa5", fontSize: 10 },
+      axisLine: { lineStyle: { color: "#22304a" } },
+      splitLine: { show: !isRight, lineStyle: { color: "rgba(30,42,61,.55)" } },
+    };
+  });
+
+  state.chart.setOption({
+    animation: false,
+    backgroundColor: "transparent",
+    grid: { left: 46, right: 56 + (nRight - 1) * 56, top: 16, bottom: 40 },
+    tooltip: {
+      trigger: "axis",
+      backgroundColor: "#0d1524",
+      borderColor: "#22304a",
+      textStyle: { color: "#d7e2f1", fontSize: 11 },
+      axisPointer: { type: "cross", lineStyle: { color: "#4cc2ff", opacity: .5 } },
+      formatter(params) {
+        const rows = params.map(p =>
+          `<div style="display:flex;align-items:center;gap:6px;padding:1px 0">
+             <span style="display:inline-block;width:8px;height:8px;border-radius:2px;background:${p.color}"></span>
+             <span style="font-family:monospace">${p.seriesName}</span>
+             <span style="margin-left:auto;font-family:monospace;color:#fff">${fmt(p.value[1])} ${units(p.seriesName)}</span>
+           </div>`);
+        return `<div style="font-family:monospace;color:#7e8aa5;margin-bottom:4px">t = ${(+params[0].value[0]).toFixed(2)} s</div>` + rows.join("");
+      },
+    },
+    dataZoom: [
+      { type: "inside", xAxisIndex: 0, filterMode: "none" },
+      { type: "slider", xAxisIndex: 0, height: 16, bottom: 6, borderColor: "#22304a",
+        backgroundColor: "#0f1521", fillerColor: "rgba(76,194,255,.12)",
+        handleStyle: { color: "#4cc2ff" }, textStyle: { color: "#7e8aa5" } },
+    ],
+    xAxis: {
+      type: "value", name: "t (s)",
+      nameTextStyle: { color: "#7e8aa5", fontSize: 10 },
+      axisLabel: { color: "#7e8aa5", fontSize: 10 },
+      axisLine: { lineStyle: { color: "#22304a" } },
+      splitLine: { show: false },
+    },
+    yAxis: yAxes,
+    series,
+  }, true);
+}
+
+function units(name) {
+  return state.fieldsMap && state.fieldsMap[name] ? state.fieldsMap[name] : guessUnit(name);
+}
+function fmt(v) {
+  if (v === null || v === undefined) return "-";
+  const a = Math.abs(v);
+  return a >= 1000 ? v.toFixed(0) : a >= 10 ? v.toFixed(1) : v.toFixed(2);
+}
+function shade(hex, f) {
+  const n = parseInt(hex.slice(1), 16);
+  const r = Math.min(255, Math.round((n >> 16 & 255) * f));
+  const g = Math.min(255, Math.round((n >> 8 & 255) * f));
+  const b = Math.min(255, Math.round((n & 255) * f));
+  return `#${((r << 16) | (g << 8) | b).toString(16).padStart(6, "0")}`;
+}
+
+/* ---------------- info tab ---------------- */
+function renderInfo(s) {
+  const el = $("panel-info");
+  el.innerHTML = "";
+  const sec = (title, items) => {
+    const h = document.createElement("h3");
+    h.textContent = title;
+    const kv = document.createElement("div");
+    kv.className = "kv";
+    items.forEach(([k, v, cls]) => {
+      const it = document.createElement("div");
+      it.className = "item";
+      it.innerHTML = `<span class="k">${k}</span><span class="v ${cls || ""}">${v}</span>`;
+      kv.appendChild(it);
+    });
+    el.appendChild(h); el.appendChild(kv);
+  };
+
+  const dur = ((s.duration_us || 0) / 1e6).toFixed(2);
+  sec("日志概览", [
+    ["固件版本", s.fc_version || "未知"],
+    ["固件类型", s.firmware_type],
+    ["录制时间", s.date_time ? new Date(s.date_time).toLocaleString() : "未知"],
+    ["时长 (s)", dur, "good"],
+    ["主帧数", s.n_main_frames.toLocaleString()],
+    ["字段数", s.field_count],
+    ["损坏帧", s.total_corrupt_frames, s.total_corrupt_frames ? "warn" : "good"],
+    ["I 帧间隔", s.frame_intervals.i],
+    ["P 帧间隔", s.frame_intervals.p_num + "/" + s.frame_intervals.p_denom],
+  ]);
+  sec("帧统计", Object.entries(s.frame_counts).map(([k, v]) => [k + " 帧 有效", v.valid + " (损坏 " + v.corrupt + ")" ]));
+  const sc = s.sys_config;
+  sec("系统配置", [
+    ["minthrottle", sc.minthrottle],
+    ["maxthrottle", sc.maxthrottle],
+    ["vbatref", sc.vbatref],
+    ["vbatscale", sc.vbatscale],
+    ["acc_1g", sc.acc_1g],
+    ["rc_rate", sc.rc_rate],
+    ["电机输出范围", sc.motor_output_low + " ~ " + sc.motor_output_high],
+  ]);
+}
+
+/* ---------------- spectrum view ---------------- */
+const SPEC_OPTIONS = ["gyroADC[0]", "gyroADC[1]", "gyroADC[2]",
+  "gyroUnfilt[0]", "gyroUnfilt[1]", "gyroUnfilt[2]",
+  "setpoint[0]", "setpoint[1]", "setpoint[2]"];
+const SPEC_COLOR = { gyroADC: "#4cc2ff", gyroUnfilt: "#7a5cff", setpoint: "#37e29e" };
+const AXIS_COLORS = ["#4cc2ff", "#37e29e", "#ff9f43"];
+
+function renderSpecBar(s) {
+  const avail = new Set(s.field_names);
+  state.specChannels = SPEC_OPTIONS.filter(n => avail.has(n)).slice(0, 6);
+  const bar = $("specBar");
+  bar.innerHTML = "";
+  state.specChannels.forEach(name => {
+    const key = name.replace(/\[\d+\]/, "");
+    const tag = document.createElement("span");
+    tag.className = "chip-tag on";
+    tag.dataset.name = name;
+    tag.style.setProperty("--cc", SPEC_COLOR[key] || "#4cc2ff");
+    tag.textContent = name;
+    tag.addEventListener("click", () => {
+      const on = tag.classList.toggle("on");
+      if (on) { if (!state.specChannels.includes(name)) state.specChannels.push(name); }
+      else state.specChannels = state.specChannels.filter(x => x !== name);
+      loadSpectrum();
+    });
+    bar.appendChild(tag);
+  });
+}
+
+async function loadSpectrum() {
+  const s = state.summary;
+  if (!s || !state.specChannels.length) return;
+  state.specLoaded = true;
+  try {
+    const resp = await fetch(`/api/decode/${s.id}/spectrum?names=${encodeURIComponent(state.specChannels.join(","))}`);
+    const body = await resp.json();
+    if (!resp.ok) throw new Error(body.detail);
+    renderSpecChart(body.series);
+  } catch (err) { console.error(err); }
+  loadWaterfall();
+}
+
+async function loadWaterfall() {
+  const s = state.summary;
+  const name = state.specChannels.find(n => n.startsWith("gyroADC"))
+    || state.specChannels.find(n => n.startsWith("gyroUnfilt"))
+    || state.specChannels[0];
+  if (!name) return;
+  try {
+    const resp = await fetch(`/api/decode/${s.id}/spectrogram?name=${encodeURIComponent(name)}`);
+    const body = await resp.json();
+    if (!resp.ok) throw new Error(body.detail);
+    renderWfChart(body, name);
+  } catch (err) { console.error(err); }
+}
+
+function renderSpecChart(seriesMap) {
+  if (!state.specChart) state.specChart = echarts.init($("specChart"));
+  const series = [];
+  for (const name of state.specChannels) {
+    const info = seriesMap[name];
+    if (!info || !info.freq || !info.freq.length) continue;
+    const key = name.replace(/\[\d+\]/, "");
+    const color = SPEC_COLOR[key] || "#ff9f43";
+    const data = info.freq.map((f, i) => [f, Math.max(info.psd[i], 1e-12)]);
+    series.push({ name, type: "line", showSymbol: false, data,
+      lineStyle: { width: 1.4, color }, itemStyle: { color } });
+  }
+  state.specChart.setOption({
+    animation: false, backgroundColor: "transparent",
+    grid: { left: 60, right: 20, top: 28, bottom: 36 },
+    tooltip: { trigger: "axis", backgroundColor: "#0d1524", borderColor: "#22304a",
+      textStyle: { color: "#d7e2f1", fontSize: 11 }, valueFormatter: v => v == null ? "-" : (+v).toExponential(2) },
+    legend: { show: true, top: 0, textStyle: { color: "#7e8aa5", fontSize: 10 } },
+    xAxis: { type: "value", name: "频率 (Hz)", min: 0,
+      nameTextStyle: { color: "#7e8aa5", fontSize: 10 }, axisLabel: { color: "#7e8aa5", fontSize: 10 },
+      axisLine: { lineStyle: { color: "#22304a" } }, splitLine: { lineStyle: { color: "rgba(30,42,61,.5)" } } },
+    yAxis: { type: "log", name: "PSD (deg/s)²/Hz",
+      nameTextStyle: { color: "#7e8aa5", fontSize: 10 }, axisLabel: { color: "#7e8aa5", fontSize: 10 },
+      axisLine: { lineStyle: { color: "#22304a" } }, splitLine: { lineStyle: { color: "rgba(30,42,61,.5)" } } },
+    series,
+  }, true);
+}
+
+function renderWfChart(sg, name) {
+  if (!state.wfChart) state.wfChart = echarts.init($("wfChart"));
+  const times = sg.times, freqs = sg.freqs;
+  const data = [];
+  const flat = [];
+  for (let ti = 0; ti < times.length; ti++) {
+    for (let fi = 0; fi < freqs.length; fi++) {
+      const v = sg.power[ti][fi];
+      data.push([times[ti], freqs[fi], v]);
+      flat.push(v);
+    }
+  }
+  const lo = quantile(flat, 0.02), hi = quantile(flat, 0.98);
+  state.wfChart.setOption({
+    animation: false, backgroundColor: "transparent",
+    grid: { left: 56, right: 70, top: 16, bottom: 40 },
+    xAxis: { type: "value", name: "t (s)",
+      nameTextStyle: { color: "#7e8aa5", fontSize: 10 }, axisLabel: { color: "#7e8aa5", fontSize: 10 },
+      axisLine: { lineStyle: { color: "#22304a" } }, splitLine: { show: false } },
+    yAxis: { type: "value", name: "频率 (Hz)", min: 0,
+      nameTextStyle: { color: "#7e8aa5", fontSize: 10 }, axisLabel: { color: "#7e8aa5", fontSize: 10 },
+      axisLine: { lineStyle: { color: "#22304a" } }, splitLine: { lineStyle: { color: "rgba(30,42,61,.5)" } } },
+    visualMap: { min: lo, max: hi, calculable: false, orient: "vertical", right: 6, top: 40, bottom: 40,
+      textStyle: { color: "#7e8aa5", fontSize: 9 },
+      inRange: { color: ["#0a1a33", "#1b4f9e", "#37e29e", "#ff9f43", "#ff5d73"] } },
+    series: [{ name, type: "heatmap", data, progressive: 5000 }],
+  }, true);
+}
+
+/* ---------------- pid error view ---------------- */
+async function loadPidError() {
+  const s = state.summary;
+  if (!s) return;
+  state.pidLoaded = true;
+  try {
+    const resp = await fetch(`/api/decode/${s.id}/pid-error`);
+    const body = await resp.json();
+    if (!resp.ok) throw new Error(body.detail);
+    renderPidError(body);
+  } catch (err) { console.error(err); }
+}
+
+function renderPidError(pe) {
+  const cards = $("pidCards");
+  cards.innerHTML = "";
+  pe.axes.forEach((ax, i) => {
+    const c = AXIS_COLORS[i % 3];
+    const ratioPct = (ax.propwash_ratio * 100).toFixed(1);
+    const card = document.createElement("div");
+    card.className = "pid-card";
+    card.innerHTML = `<div class="axis" style="color:${c}">${ax.label}</div>
+      <div class="rms">${ax.rms_error_deg_s.toFixed(1)} <small>deg/s RMS</small></div>
+      <div class="ratio">propwash (30-90Hz) 占比 <b>${ratioPct}%</b></div>`;
+    cards.appendChild(card);
+  });
+  renderPidErrorChart(pe);
+  renderPidEvtChart(pe);
+}
+
+function renderPidErrorChart(pe) {
+  if (!state.pidChart) state.pidChart = echarts.init($("pidErrorChart"));
+  const series = pe.axes.map((ax, i) => ({
+    name: ax.label, type: "line", showSymbol: false,
+    data: ax.error_psd.freq.map((f, j) => [f, Math.max(ax.error_psd.psd[j], 1e-12)]),
+    lineStyle: { width: 1.4, color: AXIS_COLORS[i] }, itemStyle: { color: AXIS_COLORS[i] },
+  }));
+  if (series.length) series[0].markArea = { silent: true,
+    itemStyle: { color: "rgba(255,159,67,.10)" },
+    label: { show: true, position: "insideTop", color: "#ff9f43", fontSize: 10 },
+    data: [[{ xAxis: 30 }, { xAxis: 90 }]] };
+  state.pidChart.setOption({
+    animation: false, backgroundColor: "transparent",
+    grid: { left: 60, right: 20, top: 28, bottom: 36 },
+    tooltip: { trigger: "axis", backgroundColor: "#0d1524", borderColor: "#22304a",
+      textStyle: { color: "#d7e2f1", fontSize: 11 } },
+    legend: { show: true, top: 0, textStyle: { color: "#7e8aa5", fontSize: 10 } },
+    xAxis: { type: "value", name: "频率 (Hz)", min: 0,
+      nameTextStyle: { color: "#7e8aa5", fontSize: 10 }, axisLabel: { color: "#7e8aa5", fontSize: 10 },
+      axisLine: { lineStyle: { color: "#22304a" } }, splitLine: { lineStyle: { color: "rgba(30,42,61,.5)" } } },
+    yAxis: { type: "log", name: "PSD (deg/s)²/Hz",
+      nameTextStyle: { color: "#7e8aa5", fontSize: 10 }, axisLabel: { color: "#7e8aa5", fontSize: 10 },
+      axisLine: { lineStyle: { color: "#22304a" } }, splitLine: { lineStyle: { color: "rgba(30,42,61,.5)" } } },
+    series,
+  }, true);
+}
+
+function renderPidEvtChart(pe) {
+  if (!state.pidEvtChart) state.pidEvtChart = echarts.init($("pidEvtChart"));
+  const series = pe.axes.map((ax, i) => ({
+    name: ax.label, type: "line", showSymbol: true, symbolSize: 4, connectNulls: false,
+    data: ax.error_vs_throttle.throttle.map((t, j) => [t, ax.error_vs_throttle.mean_abs_error[j]]),
+    lineStyle: { width: 1.4, color: AXIS_COLORS[i] }, itemStyle: { color: AXIS_COLORS[i] },
+  }));
+  state.pidEvtChart.setOption({
+    animation: false, backgroundColor: "transparent",
+    grid: { left: 56, right: 20, top: 28, bottom: 36 },
+    tooltip: { trigger: "axis", backgroundColor: "#0d1524", borderColor: "#22304a",
+      textStyle: { color: "#d7e2f1", fontSize: 11 } },
+    legend: { show: true, top: 0, textStyle: { color: "#7e8aa5", fontSize: 10 } },
+    xAxis: { type: "value", name: "油门 (0-1)", min: 0, max: 1,
+      nameTextStyle: { color: "#7e8aa5", fontSize: 10 }, axisLabel: { color: "#7e8aa5", fontSize: 10 },
+      axisLine: { lineStyle: { color: "#22304a" } }, splitLine: { lineStyle: { color: "rgba(30,42,61,.5)" } } },
+    yAxis: { type: "value", name: "mean |error| (deg/s)",
+      nameTextStyle: { color: "#7e8aa5", fontSize: 10 }, axisLabel: { color: "#7e8aa5", fontSize: 10 },
+      axisLine: { lineStyle: { color: "#22304a" } }, splitLine: { lineStyle: { color: "rgba(30,42,61,.5)" } } },
+    series,
+  }, true);
+}
+
+function quantile(arr, q) {
+  if (!arr.length) return 0;
+  const s = [...arr].sort((a, b) => a - b);
+  return s[Math.floor(q * (s.length - 1))];
+}
+
+/* ---------------- diagnose view ---------------- */
+const SEV_META = {
+  high:   { label: "高",   color: "#ff5d73" },
+  medium: { label: "中",   color: "#ff9f43" },
+  low:    { label: "低",   color: "#4cc2ff" },
+  info:   { label: "提示", color: "#7e8aa5" },
+};
+
+async function loadDiagnose() {
+  const s = state.summary;
+  if (!s) return;
+  state.diagLoaded = true;
+  try {
+    const resp = await fetch(`/api/decode/${s.id}/diagnose`);
+    const body = await resp.json();
+    if (!resp.ok) throw new Error(body.detail);
+    renderDiagnose(body);
+  } catch (err) { console.error(err); }
+}
+
+function renderDiagnose(d) {
+  const box = $("diagBody");
+  box.innerHTML = "";
+  box.appendChild(buildPidSummary());
+  if (!d.findings || !d.findings.length) {
+    const empty = document.createElement("div");
+    empty.className = "diag-empty";
+    empty.textContent = "未发现明显问题，PID 状态良好。";
+    box.appendChild(empty);
+    return;
+  }
+  d.findings.forEach(f => {
+    const meta = SEV_META[f.severity] || SEV_META.info;
+    const card = document.createElement("div");
+    card.className = "diag-card";
+    card.style.setProperty("--sev-color", meta.color);
+    const axisTag = f.axis ? `<span class="axis-tag">${f.axis}</span>` : "";
+    const cliLines = (f.cli || []).map(c => `<div class="cli-line">${c}</div>`).join("");
+    card.innerHTML = `<div class="head">
+        <span class="sev" style="background:${meta.color}">${meta.label}</span>
+        <span class="title">${f.title}</span>
+        ${axisTag}
+      </div>
+      <div class="detail">${f.detail}</div>
+      <div class="action"><b>建议：</b>${f.action}</div>
+      ${cliLines ? `<div class="cli">${cliLines}</div>` : ""}`;
+    box.appendChild(card);
+  });
+}
+
+function buildPidSummary() {
+  const sc = (state.summary && state.summary.sys_config) || {};
+  const fmtPid = arr => (arr && arr.length === 3) ? `P${arr[0]} I${arr[1]} D${arr[2]}` : "—";
+  const el = document.createElement("div");
+  el.className = "diag-summary";
+  el.innerHTML = `<div class="ds-title">当前 PID 配置</div>
+    <div class="ds-row">
+      <span>roll <b>${fmtPid(sc.pid_roll)}</b></span>
+      <span>pitch <b>${fmtPid(sc.pid_pitch)}</b></span>
+      <span>yaw <b>${fmtPid(sc.pid_yaw)}</b></span>
+    </div>
+    <div class="ds-row ds-dim" style="margin-top:6px">
+      <span>gyro_lpf2 ${sc.gyro_lpf2_static_hz ?? "—"} Hz</span>
+      <span>dterm_lpf2 ${sc.dterm_lpf2_static_hz ?? "—"} Hz</span>
+    </div>`;
+  return el;
+}
+
+/* ---------------- step response view ---------------- */
+const STEP_AXES = ["roll", "pitch", "yaw"];
+
+async function loadStepResponse() {
+  const s = state.summary;
+  if (!s) return;
+  state.stepLoaded = true;
+  renderStepBar();
+  try {
+    const resp = await fetch(`/api/decode/${s.id}/step-response?threshold=100`);
+    const body = await resp.json();
+    if (!resp.ok) throw new Error(body.detail);
+    state.stepData = body;
+    renderStepResponse(body);
+  } catch (err) { console.error(err); }
+}
+
+function renderStepBar() {
+  const bar = $("stepBar");
+  bar.innerHTML = "";
+  STEP_AXES.forEach((label, i) => {
+    const tag = document.createElement("span");
+    tag.className = "chip-tag" + (i === state.stepAxis ? " on" : "");
+    tag.dataset.axis = i;
+    tag.style.setProperty("--cc", AXIS_COLORS[i]);
+    tag.textContent = label;
+    tag.addEventListener("click", () => {
+      state.stepAxis = i;
+      renderStepBar();
+      if (state.stepData) renderStepResponse(state.stepData);
+    });
+    bar.appendChild(tag);
+  });
+}
+
+function renderStepResponse(r) {
+  const ax = (r.axes || []).find(a => a.axis === state.stepAxis) || (r.axes && r.axes[0]);
+  const title = $("stepTitle");
+  if (!ax || !ax.steps || !ax.steps.length) {
+    title.textContent = `${ax ? ax.label : "—"} — 未检测到阶跃（悬停/自稳日志 setpoint 变化平缓，阶跃响应需 ACRO 机动）`;
+    if (state.stepChart) state.stepChart.clear();
+    return;
+  }
+  const steps = [...ax.steps].sort((a, b) => Math.abs(b.step_mag) - Math.abs(a.step_mag));
+  const s = steps[0];
+  title.textContent = `${ax.label} 阶跃响应 — t0=${s.t0.toFixed(2)}s 幅度=${s.step_mag.toFixed(0)} deg/s · 超调=${s.overshoot_pct.toFixed(1)}% · 上升=${(s.rise_time_s * 1000).toFixed(1)}ms（共 ${ax.steps.length} 个阶跃，显示幅度最大）`;
+  renderStepChart(s);
+}
+
+function renderStepChart(s) {
+  if (!state.stepChart) state.stepChart = echarts.init($("stepChart"));
+  const d = s.data;
+  const spData = d.t.map((t, i) => [t, d.setpoint[i]]);
+  const gyData = d.t.map((t, i) => [t, d.gyro[i]]);
+  state.stepChart.setOption({
+    animation: false, backgroundColor: "transparent",
+    grid: { left: 56, right: 20, top: 30, bottom: 36 },
+    tooltip: { trigger: "axis", backgroundColor: "#0d1524", borderColor: "#22304a",
+      textStyle: { color: "#d7e2f1", fontSize: 11 } },
+    legend: { show: true, top: 0, textStyle: { color: "#7e8aa5", fontSize: 10 } },
+    xAxis: { type: "value", name: "t (s，相对阶跃)", nameTextStyle: { color: "#7e8aa5", fontSize: 10 },
+      axisLabel: { color: "#7e8aa5", fontSize: 10 }, axisLine: { lineStyle: { color: "#22304a" } },
+      splitLine: { lineStyle: { color: "rgba(30,42,61,.5)" } } },
+    yAxis: { type: "value", name: "deg/s", nameTextStyle: { color: "#7e8aa5", fontSize: 10 },
+      axisLabel: { color: "#7e8aa5", fontSize: 10 }, axisLine: { lineStyle: { color: "#22304a" } },
+      splitLine: { lineStyle: { color: "rgba(30,42,61,.5)" } } },
+    series: [
+      { name: "setpoint", type: "line", showSymbol: false, data: spData,
+        lineStyle: { width: 1.5, color: "#37e29e", type: "dashed" }, itemStyle: { color: "#37e29e" } },
+      { name: "gyro", type: "line", showSymbol: false, data: gyData,
+        lineStyle: { width: 1.8, color: "#4cc2ff" }, itemStyle: { color: "#4cc2ff" } },
+    ],
+  }, true);
+}
+</script>
+</body>
+</html>
