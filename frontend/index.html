@@ -66,6 +66,17 @@
   .chip.ready .dot { background: var(--accent-2); box-shadow: 0 0 6px var(--accent-2); }
   .chip.ready { color: var(--text); border-color: #274a4a; }
 
+  /* ---------- multi-log selector ---------- */
+  .log-select { display: flex; align-items: center; gap: 6px; padding-left: 2px; }
+  .log-select .log-lbl { font-size: 11px; color: var(--text-dim); margin-right: 2px; }
+  .log-chip {
+    padding: 3px 10px; border-radius: 14px; font-size: 12px; cursor: pointer;
+    background: #16233a; color: var(--text-dim); border: 1px solid var(--line);
+    font-family: var(--mono); transition: all .12s;
+  }
+  .log-chip.on { color: var(--accent); border-color: #274a5e; background: #1a2a45; }
+  .log-chip:hover { color: var(--text); }
+
   /* ---------- layout ---------- */
   .main { display: flex; height: calc(100% - 52px); }
   .sidebar {
@@ -219,6 +230,25 @@
   .diag-summary .ds-row b { color: var(--accent); font-weight: 600; }
   .diag-summary .ds-dim { color: var(--text-dim); }
 
+  /* ---------- step response view (PIDtoolbox style) ---------- */
+  .step-summary { display: flex; flex-wrap: wrap; gap: 14px; padding: 12px 16px; border-bottom: 1px solid var(--line-soft); background: var(--panel-2); align-items: center; }
+  .step-summary .sh-title { font-size: 11px; font-weight: 700; color: var(--accent); text-transform: uppercase; letter-spacing: .5px; margin-right: 8px; }
+  .step-summary .sh-concl { font-size: 12px; color: var(--text); flex: 1; min-width: 300px; line-height: 1.6; }
+  .step-summary .sh-concl .good { color: var(--accent-2); font-weight: 600; }
+  .step-summary .sh-concl .warn { color: var(--warn); font-weight: 600; }
+  .step-summary .sh-concl .bad { color: var(--danger); font-weight: 600; }
+  .step-thresh { display: flex; align-items: center; gap: 8px; font-size: 12px; color: var(--text-dim); }
+  .step-thresh input { width: 60px; background: var(--panel); border: 1px solid var(--line); color: var(--text); border-radius: 6px; padding: 3px 6px; font-family: var(--mono); font-size: 12px; }
+  .step-rows { flex: 1; min-height: 0; display: flex; flex-direction: column; gap: 1px; background: var(--line-soft); overflow: hidden; }
+  .step-row { flex: 1; min-height: 0; display: flex; background: var(--bg); position: relative; }
+  .step-row-main { flex: 1; min-width: 0; position: relative; }
+  .step-row-side { width: 110px; min-width: 110px; display: flex; flex-direction: column; gap: 1px; background: var(--line-soft); }
+  .step-row-side-chart { flex: 1; min-height: 0; background: var(--bg); }
+  .step-label { position: absolute; top: 6px; left: 56px; font-size: 12px; font-weight: 700; color: #c94c4c; z-index: 2; pointer-events: none; font-family: var(--mono); }
+  .step-pidtag { position: absolute; top: 6px; right: 14px; font-size: 11px; color: #c94c4c; z-index: 2; pointer-events: none; font-family: var(--mono); text-align: right; line-height: 1.5; }
+  .step-pidtag .pid-line { white-space: nowrap; }
+  .step-empty { flex: 1; display: flex; align-items: center; justify-content: center; color: var(--text-dim); font-size: 13px; padding: 40px; text-align: center; line-height: 1.7; }
+
 
 
   /* ---------- info tab ---------- */
@@ -258,6 +288,7 @@
   <div class="sub">Betaflight 黑匣子（.bbl）解码与分析</div>
   <div class="spacer"></div>
   <div class="chip" id="chipFile">未加载日志</div>
+  <div class="log-select" id="logSelect" style="display:none"></div>
 </div>
 
 <div class="main">
@@ -315,10 +346,8 @@
     </div>
 
     <div class="chart-wrap hidden" id="stepView">
-      <div class="spec-bar" id="stepBar"></div>
-      <div class="step-grid">
-        <div class="pane"><div class="pane-title" id="stepTitle">阶跃响应</div><div id="stepChart" class="pane-body"></div></div>
-      </div>
+      <div class="step-summary" id="stepSummary"></div>
+      <div class="step-rows" id="stepRows"></div>
     </div>
   </div>
 </div>
@@ -367,13 +396,17 @@ const AXIS_STYLE = [
 ];
 
 const state = { sid: null, summary: null, fields: [], selected: [], chart: null,
+  logs: null, logIndex: 0,
   view: "time", specChannels: [], specChart: null, wfChart: null,
   pidChart: null, pidEvtChart: null, specLoaded: false, pidLoaded: false, diagLoaded: false,
-  stepLoaded: false, stepChart: null, stepAxis: 0, stepData: null };
+  stepLoaded: false, stepCharts: {}, stepData: null, stepThreshold: 100 };
 
 /* ---------------- bootstrap ---------------- */
 const $ = (id) => document.getElementById(id);
-const ALL_CHARTS = () => [state.chart, state.specChart, state.wfChart, state.pidChart, state.pidEvtChart, state.stepChart];
+const ALL_CHARTS = () => {
+  const base = [state.chart, state.specChart, state.wfChart, state.pidChart, state.pidEvtChart];
+  return base.concat(Object.values(state.stepCharts));
+};
 window.addEventListener("resize", () => ALL_CHARTS().forEach(c => c && c.resize()));
 
 ["dragenter", "dragover"].forEach(ev => window.addEventListener(ev, e => { e.preventDefault(); $("dropzone").classList.add("over"); }));
@@ -426,15 +459,49 @@ async function handleFiles(files) {
     const resp = await fetch("/api/decode", { method: "POST", body: form });
     const body = await resp.json();
     if (!resp.ok) throw new Error(body.detail || resp.statusText);
-    const log = body.logs[0];
-    state.sid = log.id;
-    state.summary = log;
-    onLogLoaded(log);
+    state.logs = body.logs;
+    state.logIndex = 0;
+    selectLog(0);
   } catch (err) {
     alert("解析失败：" + err.message);
   } finally {
     $("overlay").classList.remove("show");
   }
+}
+
+function selectLog(i) {
+  if (!state.logs || i < 0 || i >= state.logs.length) return;
+  const log = state.logs[i];
+  state.logIndex = i;
+  state.sid = log.id;
+  state.summary = log;
+  renderLogSelector();
+  onLogLoaded(log);
+}
+
+function renderLogSelector() {
+  const box = $("logSelect");
+  if (!box) return;
+  const logs = state.logs || [];
+  if (logs.length <= 1) {
+    box.style.display = "none";
+    box.innerHTML = "";
+    return;
+  }
+  box.style.display = "flex";
+  box.innerHTML = "";
+  const lbl = document.createElement("span");
+  lbl.className = "log-lbl";
+  lbl.textContent = "飞行段";
+  box.appendChild(lbl);
+  logs.forEach((log, i) => {
+    const btn = document.createElement("button");
+    btn.className = "log-chip" + (i === state.logIndex ? " on" : "");
+    btn.textContent = "#" + (i + 1);
+    btn.title = log.name;
+    btn.addEventListener("click", () => selectLog(i));
+    box.appendChild(btn);
+  });
 }
 
 function onLogLoaded(s) {
@@ -453,6 +520,10 @@ function onLogLoaded(s) {
   state.pidLoaded = false;
   state.diagLoaded = false;
   state.stepLoaded = false;
+  // dispose old step charts
+  Object.values(state.stepCharts).forEach(c => c && c.dispose && c.dispose());
+  state.stepCharts = {};
+  state.stepData = null;
   renderChannelList(s);
   renderInfo(s);
   renderSpecBar(s);
@@ -1017,16 +1088,17 @@ function buildPidSummary() {
   return el;
 }
 
-/* ---------------- step response view ---------------- */
-const STEP_AXES = ["roll", "pitch", "yaw"];
+/* ---------------- step response view (PIDtoolbox style) ---------------- */
+const STEP_AXES = ["Roll", "Pitch", "Yaw"];
+const STEP_COLOR = "#8B2020";
+const STEP_COLOR_LIGHT = "#c94c4c";
 
 async function loadStepResponse() {
   const s = state.summary;
   if (!s) return;
   state.stepLoaded = true;
-  renderStepBar();
   try {
-    const resp = await fetch(`/api/decode/${s.id}/step-response?threshold=100`);
+    const resp = await fetch(`/api/decode/${s.id}/step-response?threshold=${state.stepThreshold}&max_steps=50`);
     const body = await resp.json();
     if (!resp.ok) throw new Error(body.detail);
     state.stepData = body;
@@ -1034,61 +1106,205 @@ async function loadStepResponse() {
   } catch (err) { console.error(err); }
 }
 
-function renderStepBar() {
-  const bar = $("stepBar");
-  bar.innerHTML = "";
-  STEP_AXES.forEach((label, i) => {
-    const tag = document.createElement("span");
-    tag.className = "chip-tag" + (i === state.stepAxis ? " on" : "");
-    tag.dataset.axis = i;
-    tag.style.setProperty("--cc", AXIS_COLORS[i]);
-    tag.textContent = label;
-    tag.addEventListener("click", () => {
-      state.stepAxis = i;
-      renderStepBar();
-      if (state.stepData) renderStepResponse(state.stepData);
-    });
-    bar.appendChild(tag);
-  });
+function _getStepChart(key) {
+  if (!state.stepCharts[key]) {
+    const el = document.getElementById(`step-chart-${key}`);
+    if (!el) return null;
+    state.stepCharts[key] = echarts.init(el);
+  }
+  return state.stepCharts[key];
+}
+
+function _classifyStep(peak, latMs, riseMs) {
+  const overshoot = (peak - 1.0) * 100;
+  let cls = "good", text = "响应良好";
+  const issues = [];
+  if (overshoot > 25) issues.push({ cls: "bad", t: `超调 ${overshoot.toFixed(0)}% 偏大` });
+  else if (overshoot > 10) issues.push({ cls: "warn", t: `超调 ${overshoot.toFixed(0)}% 中等` });
+  if (riseMs > 250) issues.push({ cls: "bad", t: `上升 ${riseMs.toFixed(0)}ms 偏慢` });
+  else if (riseMs > 150) issues.push({ cls: "warn", t: `上升 ${riseMs.toFixed(0)}ms 略慢` });
+  if (latMs > 40) issues.push({ cls: "warn", t: `延迟 ${latMs.toFixed(0)}ms 偏高` });
+  if (issues.length === 0) return { cls, text };
+  return { cls: issues[0].cls, text: issues.map(i => i.t).join("，") };
 }
 
 function renderStepResponse(r) {
-  const ax = (r.axes || []).find(a => a.axis === state.stepAxis) || (r.axes && r.axes[0]);
-  const title = $("stepTitle");
-  if (!ax || !ax.steps || !ax.steps.length) {
-    title.textContent = `${ax ? ax.label : "—"} — 未检测到阶跃（悬停/自稳日志 setpoint 变化平缓，阶跃响应需 ACRO 机动）`;
-    if (state.stepChart) state.stepChart.clear();
+  const rowsBox = $("stepRows");
+  const sumBox = $("stepSummary");
+  rowsBox.innerHTML = "";
+  const axes = r.axes || [];
+  const validAxes = axes.filter(a => a.avg_curve && a.summary && a.summary.count > 0);
+
+  if (validAxes.length === 0) {
+    sumBox.innerHTML = `<div class="sh-title">Step Response Functions</div>
+      <div class="sh-concl"><span class="warn">未检测到有效阶跃。</span> 阶跃响应需要 ACRO 模式下快速打杆的机动日志，悬停/自稳日志 setpoint 变化平缓无法分析。可尝试降低检测阈值。</div>
+      <div class="step-thresh"><span>阈值 (deg/s):</span><input type="number" id="stepThreshInput" value="${state.stepThreshold}" min="10" max="1000" step="10"></div>`;
+    rowsBox.innerHTML = `<div class="step-empty">未检测到 setpoint 阶跃。<br>请使用 ACRO 模式下快速打杆飞行的 BBL 日志，或降低检测阈值后重试。</div>`;
+    const inp = $("stepThreshInput");
+    if (inp) inp.addEventListener("change", () => {
+      const v = parseFloat(inp.value);
+      if (!isNaN(v) && v >= 10 && v <= 2000) {
+        state.stepThreshold = v;
+        state.stepLoaded = false;
+        loadStepResponse();
+      }
+    });
     return;
   }
-  const steps = [...ax.steps].sort((a, b) => Math.abs(b.step_mag) - Math.abs(a.step_mag));
-  const s = steps[0];
-  title.textContent = `${ax.label} 阶跃响应 — t0=${s.t0.toFixed(2)}s 幅度=${s.step_mag.toFixed(0)} deg/s · 超调=${s.overshoot_pct.toFixed(1)}% · 上升=${(s.rise_time_s * 1000).toFixed(1)}ms（共 ${ax.steps.length} 个阶跃，显示幅度最大）`;
-  renderStepChart(s);
+
+  const parts = validAxes.map(a => {
+    const s = a.summary;
+    const c = _classifyStep(s.median_peak, s.median_latency_ms, s.median_rise_time_ms);
+    return `<b>${a.label}</b> <span class="${c.cls}">Peak ${s.median_peak.toFixed(2)} · Latency ${s.median_latency_ms.toFixed(0)}ms</span>`;
+  });
+  sumBox.innerHTML = `<div class="sh-title">Step Response Functions</div>
+    <div class="sh-concl">${parts.join(" &nbsp;|&nbsp; ")} &nbsp;—&nbsp; n=${validAxes.map(a => a.summary.count).join("/")} 样本/轴</div>
+    <div class="step-thresh"><span>阈值 (deg/s):</span><input type="number" id="stepThreshInput" value="${state.stepThreshold}" min="10" max="1000" step="10"></div>`;
+  const inp = $("stepThreshInput");
+  if (inp) inp.addEventListener("change", () => {
+    const v = parseFloat(inp.value);
+    if (!isNaN(v) && v >= 10 && v <= 2000) {
+      state.stepThreshold = v;
+      state.stepLoaded = false;
+      Object.values(state.stepCharts).forEach(c => c && c.dispose && c.dispose());
+      state.stepCharts = {};
+      loadStepResponse();
+    }
+  });
+
+  axes.forEach((ax) => {
+    const key = ax.label;
+    const row = document.createElement("div");
+    row.className = "step-row";
+    row.innerHTML = `
+      <div class="step-row-main" id="step-chart-main-${key}">
+        <div class="step-label">${ax.label} Response</div>
+        <div class="step-pidtag" id="step-pidtag-${key}"></div>
+      </div>
+      <div class="step-row-side">
+        <div class="step-row-side-chart" id="step-chart-peak-${key}"></div>
+        <div class="step-row-side-chart" id="step-chart-lat-${key}"></div>
+      </div>`;
+    rowsBox.appendChild(row);
+
+    if (ax.pid) {
+      const tag = $(`step-pidtag-${key}`);
+      if (tag) {
+        tag.innerHTML = `<div class="pid-line">P, I, D, Dm, F</div>
+          <div class="pid-line">${ax.pid.P},${ax.pid.I},${ax.pid.D},${ax.pid.Dm},${ax.pid.F}${ax.summary ? ` (n=${ax.summary.count})` : ""}</div>`;
+      }
+    }
+
+    if (!ax.avg_curve || !ax.summary) {
+      const mainChart = _getStepChart(`main-${key}`);
+      if (mainChart) {
+        mainChart.setOption({
+          backgroundColor: "transparent",
+          grid: { left: 52, right: 14, top: 28, bottom: 30 },
+          xAxis: { type: "value", min: 0, max: 500, name: "Time (ms)",
+            nameTextStyle: { color: "#7e8aa5", fontSize: 10 }, axisLabel: { color: "#7e8aa5", fontSize: 10 },
+            axisLine: { lineStyle: { color: "#2a3650" } }, splitLine: { lineStyle: { color: "rgba(42,54,80,.5)" } } },
+          yAxis: { type: "value", min: 0, max: 1.75, name: ax.label + " Response",
+            nameTextStyle: { color: "#7e8aa5", fontSize: 10 }, axisLabel: { color: "#7e8aa5", fontSize: 10 },
+            axisLine: { lineStyle: { color: "#2a3650" } }, splitLine: { lineStyle: { color: "rgba(42,54,80,.5)" } } },
+          series: [],
+          graphic: { type: "text", left: "center", top: "middle",
+            style: { text: "No steps detected", fill: "#5a6a88", fontSize: 12 } }
+        });
+      }
+      return;
+    }
+
+    renderStepMainChart(ax);
+    const latMax = Math.max(20, Math.max(...ax.latencies_ms) * 1.2 + 5);
+    renderStepScatterChart(`peak-${key}`, ax.peaks, ax.label + " Peak", 0.8, 1.7, ax.summary.median_peak, true);
+    renderStepScatterChart(`lat-${key}`, ax.latencies_ms, ax.label + " Latency (ms)", 0, latMax, ax.summary.median_latency_ms, false);
+  });
+
+  setTimeout(() => ALL_CHARTS().forEach(c => c && c.resize()), 60);
 }
 
-function renderStepChart(s) {
-  if (!state.stepChart) state.stepChart = echarts.init($("stepChart"));
-  const d = s.data;
-  const spData = d.t.map((t, i) => [t, d.setpoint[i]]);
-  const gyData = d.t.map((t, i) => [t, d.gyro[i]]);
-  state.stepChart.setOption({
-    animation: false, backgroundColor: "transparent",
-    grid: { left: 56, right: 20, top: 30, bottom: 36 },
+function renderStepMainChart(ax) {
+  const key = ax.label;
+  const chart = _getStepChart(`main-${key}`);
+  if (!chart) return;
+  const curve = ax.avg_curve;
+  const points = [];
+  for (let i = 0; i < curve.t_ms.length; i++) {
+    const v = curve.response[i];
+    if (v !== null && v !== undefined && !isNaN(v)) {
+      points.push([curve.t_ms[i] * 1000, v]);
+    }
+  }
+
+  chart.setOption({
+    animation: false,
+    backgroundColor: "transparent",
+    grid: { left: 52, right: 14, top: 28, bottom: 30 },
     tooltip: { trigger: "axis", backgroundColor: "#0d1524", borderColor: "#22304a",
-      textStyle: { color: "#d7e2f1", fontSize: 11 } },
-    legend: { show: true, top: 0, textStyle: { color: "#7e8aa5", fontSize: 10 } },
-    xAxis: { type: "value", name: "t (s，相对阶跃)", nameTextStyle: { color: "#7e8aa5", fontSize: 10 },
-      axisLabel: { color: "#7e8aa5", fontSize: 10 }, axisLine: { lineStyle: { color: "#22304a" } },
-      splitLine: { lineStyle: { color: "rgba(30,42,61,.5)" } } },
-    yAxis: { type: "value", name: "deg/s", nameTextStyle: { color: "#7e8aa5", fontSize: 10 },
-      axisLabel: { color: "#7e8aa5", fontSize: 10 }, axisLine: { lineStyle: { color: "#22304a" } },
-      splitLine: { lineStyle: { color: "rgba(30,42,61,.5)" } } },
+      textStyle: { color: "#d7e2f1", fontSize: 11 },
+      formatter: (params) => {
+        if (!params || !params[0]) return "";
+        const p = params[0];
+        return `<span style="font-family:monospace">t = ${p.value[0].toFixed(0)} ms<br>resp = ${p.value[1].toFixed(3)}</span>`;
+      }
+    },
+    xAxis: { type: "value", name: "Time (ms)", min: 0, max: 500,
+      nameTextStyle: { color: "#7e8aa5", fontSize: 10 }, axisLabel: { color: "#7e8aa5", fontSize: 10 },
+      axisLine: { lineStyle: { color: "#2a3650" } }, splitLine: { lineStyle: { color: "rgba(42,54,80,.5)" } } },
+    yAxis: { type: "value", min: 0, max: 1.75,
+      nameTextStyle: { color: "#7e8aa5", fontSize: 10 }, axisLabel: { color: "#7e8aa5", fontSize: 10 },
+      axisLine: { lineStyle: { color: "#2a3650" } }, splitLine: { lineStyle: { color: "rgba(42,54,80,.5)" } } },
     series: [
-      { name: "setpoint", type: "line", showSymbol: false, data: spData,
-        lineStyle: { width: 1.5, color: "#37e29e", type: "dashed" }, itemStyle: { color: "#37e29e" } },
-      { name: "gyro", type: "line", showSymbol: false, data: gyData,
-        lineStyle: { width: 1.8, color: "#4cc2ff" }, itemStyle: { color: "#4cc2ff" } },
-    ],
+      {
+        name: "response", type: "line", showSymbol: false, data: points,
+        lineStyle: { width: 2.2, color: STEP_COLOR }, itemStyle: { color: STEP_COLOR },
+        sampling: "lttb",
+        markLine: { silent: true, symbol: "none", animation: false,
+          lineStyle: { color: "rgba(200,200,200,.45)", type: "dashed", width: 1 },
+          label: { show: false },
+          data: [{ yAxis: 1.0 }]
+        }
+      }
+    ]
+  }, true);
+}
+
+function renderStepScatterChart(key, values, title, yMin, yMax, medianVal, showRefLine) {
+  const chart = _getStepChart(key);
+  if (!chart || !values || values.length === 0) return;
+  const data = values.map(v => [1 + (Math.random() - 0.5) * 0.15, v]);
+  const markLineData = [];
+  if (showRefLine) markLineData.push({ yAxis: 1.0 });
+  if (medianVal !== undefined && medianVal !== null) markLineData.push({ yAxis: medianVal });
+
+  const seriesOpt = {
+    name: title, type: "scatter", data,
+    symbol: "square", symbolSize: 6,
+    itemStyle: { color: STEP_COLOR, borderColor: STEP_COLOR_LIGHT, borderWidth: 0.5 },
+  };
+  if (markLineData.length) {
+    seriesOpt.markLine = {
+      silent: true, symbol: "none", animation: false,
+      lineStyle: { color: "rgba(200,200,200,.4)", type: "dashed", width: 1 },
+      label: { show: false },
+      data: markLineData
+    };
+  }
+
+  chart.setOption({
+    animation: false,
+    backgroundColor: "transparent",
+    grid: { left: 8, right: 8, top: 22, bottom: 24 },
+    title: { text: title, left: "center", top: 2,
+      textStyle: { color: "#7e8aa5", fontSize: 9, fontWeight: 600 } },
+    xAxis: { type: "value", min: 0.5, max: 1.5,
+      axisLabel: { show: false }, axisLine: { lineStyle: { color: "#2a3650" } },
+      axisTick: { show: false }, splitLine: { show: false } },
+    yAxis: { type: "value", min: yMin, max: yMax,
+      axisLabel: { color: "#7e8aa5", fontSize: 9, formatter: (v) => Number.isInteger(v) ? v : v.toFixed(1) },
+      axisLine: { lineStyle: { color: "#2a3650" } }, splitLine: { lineStyle: { color: "rgba(42,54,80,.4)" } } },
+    series: [seriesOpt]
   }, true);
 }
 </script>

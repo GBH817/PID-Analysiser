@@ -239,31 +239,122 @@ def _error_vs_throttle(error: np.ndarray, throttle: Optional[np.ndarray],
 # Step response analysis (PIDtoolbox style)
 # ---------------------------------------------------------------------------
 
+# Time grid for the averaged normalized step response (ms, relative to step edge)
+_STEP_T_PRE_MS = 50      # ms before step edge
+_STEP_T_POST_MS = 500    # ms after step edge (matches PIDtoolbox default 500ms view)
+_STEP_T_DT_MS = 1.0      # 1 ms resolution → 551 samples
+
+
 def step_response_analysis(parser: FlightLogParser, threshold: float = 100.0,
                            pre: float = 0.2, post: float = 0.8,
-                           max_steps: int = 10) -> Dict:
-    """Detect setpoint step changes and extract the gyro response.
+                           max_steps: int = 50) -> Dict:
+    """Detect setpoint step changes and compute PIDtoolbox-style average response.
 
-    For each step, returns the response window plus overshoot / rise-time.
+    For each axis returns:
+      - Normalized & aligned average response curve (0 = baseline, 1 = target),
+        interpolated onto a common ms grid from -50ms to +500ms.
+      - Per-step peak (normalized) and latency (ms, from edge to 10% response).
+      - Median peak / latency / rise-time.
+      - Current P, I, D, Dmin, FF gains for that axis (taken from header).
     """
     t = _time_axis(parser)
     fs = estimate_sample_rate(t)
     names = parser.frame_defs[ord("I")].field_names
+    sc = parser.sys_config
+
+    # PID gains per axis (roll, pitch, yaw), matching Betaflight sys_config order.
+    pid_gains = [
+        (list(sc.pid_roll)  if sc.pid_roll  else [0, 0, 0]),
+        (list(sc.pid_pitch) if sc.pid_pitch else [0, 0, 0]),
+        (list(sc.pid_yaw)   if sc.pid_yaw   else [0, 0, 0]),
+    ]
+    dmin = list(sc.d_min) if sc.d_min else [0, 0, 0]
+    ff = list(sc.ff_weight) if sc.ff_weight else [0, 0, 0]
 
     axes_out = []
     for axis in range(3):
         sp_name = f"setpoint[{axis}]"
         gy_name = f"gyroADC[{axis}]"
         if sp_name not in names or gy_name not in names:
+            axes_out.append({"axis": axis, "label": AXIS_LABELS[axis], "steps": [],
+                              "avg_curve": None, "peaks": [], "latencies_ms": [],
+                              "summary": None, "pid": None})
             continue
         sp = _field_values(parser, sp_name)
         gy = _field_values(parser, gy_name)
         # yaw is under-actuated on most quads, so its commanded rates are much
-        # lower than roll/pitch; use a proportionally lower step threshold so
-        # low-amplitude yaw steps are still detected.
+        # lower than roll/pitch; use a proportionally lower step threshold.
         axis_threshold = threshold * 0.5 if axis == 2 else threshold
         steps = _detect_steps(t, sp, gy, fs, axis_threshold, pre, post, max_steps)
-        axes_out.append({"axis": axis, "label": AXIS_LABELS[axis], "steps": steps})
+
+        avg_curve = None
+        peaks = []
+        latencies_ms = []
+        rises_ms = []
+        overshoots_pct = []
+
+        if steps:
+            # Build common time grid in seconds relative to edge
+            t_grid_s = (np.arange(-_STEP_T_PRE_MS, _STEP_T_POST_MS + _STEP_T_DT_MS * 0.5,
+                                  _STEP_T_DT_MS) / 1000.0)
+            norm_traces = []
+            for s in steps:
+                seg_t = np.asarray(s["data"]["t"], dtype=np.float64)
+                seg_gy = np.asarray(s["data"]["gyro"], dtype=np.float64)
+                step_mag = s["step_mag"]
+                if abs(step_mag) < 1e-6:
+                    continue
+                # Normalize so baseline = 0, target = 1 (absolute step for negative deflections)
+                norm = (seg_gy - s["baseline"]) / step_mag
+                # Interpolate onto common grid; clip to window coverage
+                mask = (t_grid_s >= seg_t[0]) & (t_grid_s <= seg_t[-1])
+                if not mask.any():
+                    continue
+                interp = np.full_like(t_grid_s, np.nan, dtype=np.float64)
+                interp[mask] = np.interp(t_grid_s[mask], seg_t, norm,
+                                          left=np.nan, right=np.nan)
+                norm_traces.append(interp)
+                peaks.append(float(s["peak_normalized"]))
+                latencies_ms.append(float(s["latency_ms"]))
+                rises_ms.append(float(s["rise_time_ms"]))
+                overshoots_pct.append(float(s["overshoot_pct"]))
+
+            if norm_traces:
+                arr = np.vstack(norm_traces)
+                # Mean across traces, ignoring NaN (partial coverage at edges)
+                with np.errstate(all="ignore"):
+                    avg = np.nanmean(arr, axis=0)
+                # Time grid in ms for the frontend
+                avg_curve = {
+                    "t_ms": t_grid_s.tolist(),
+                    "response": np.where(np.isnan(avg), None, avg).tolist(),
+                    "n_traces": len(norm_traces),
+                }
+
+        summary = None
+        if steps and peaks:
+            summary = {
+                "count": len(steps),
+                "median_peak": float(np.median(peaks)),
+                "median_latency_ms": float(np.median(latencies_ms)),
+                "median_rise_time_ms": float(np.median(rises_ms)) if rises_ms else 0.0,
+                "median_overshoot_pct": float(np.median(overshoots_pct)),
+            }
+
+        P, I, D = pid_gains[axis][0], pid_gains[axis][1], pid_gains[axis][2]
+        Dm = dmin[axis] if axis < len(dmin) else 0
+        F = ff[axis] if axis < len(ff) else 0
+
+        axes_out.append({
+            "axis": axis,
+            "label": AXIS_LABELS[axis],
+            "steps": steps,
+            "avg_curve": avg_curve,
+            "peaks": peaks,
+            "latencies_ms": latencies_ms,
+            "summary": summary,
+            "pid": {"P": int(P), "I": int(I), "D": int(D), "Dm": int(Dm), "F": int(F)},
+        })
 
     return {"sample_rate": fs, "axes": axes_out}
 
@@ -276,9 +367,8 @@ def _detect_steps(t: np.ndarray, sp: np.ndarray, gy: np.ndarray, fs: float,
     gy = np.asarray(gy, dtype=np.float64)
 
     # Betaflight's setpoint is smoothed by RC smoothing, so a "step" is a ramp
-    # rather than a single-sample jump. The setpoint is also stored as int16,
-    # which leaves occasional zero-diff samples inside the ramp; close those
-    # small gaps so a full stick deflection is seen as one contiguous run.
+    # rather than a single-sample jump. Close small gaps in the motion mask so
+    # a full stick deflection is seen as one contiguous run.
     d = np.diff(sp)
     moving = np.abs(d) >= 0.5
     gap = max(int(0.02 * fs), 10)
@@ -321,31 +411,89 @@ def _detect_steps(t: np.ndarray, sp: np.ndarray, gy: np.ndarray, fs: float,
         if win_end - win_start < 8:
             continue
 
-        seg_gy = gy[e + 1:win_end]
-        if seg_gy.size == 0:
+        win_gy = gy[win_start:win_end]
+        win_sp = sp[win_start:win_end]
+        win_t = t[win_start:win_end] - t[e]
+        e_rel = e - win_start  # edge index within window
+
+        post_gy = gy[e + 1:win_end]
+        if post_gy.size == 0:
             continue
-        if step_mag > 0:
-            overshoot = float(np.max(seg_gy) - target)
+
+        # Overshoot is only meaningful while the setpoint stays near its new
+        # steady-state level; if the pilot moves again inside the post window the
+        # gyro would follow a *new* command and be misread as overshoot.
+        post_sp = sp[e + 1:win_end]
+        tol = abs(step_mag) * 0.25 + 5.0
+        near_idx = np.flatnonzero(np.abs(post_sp - target) <= tol)
+        if near_idx.size:
+            if step_mag > 0:
+                pk_rel = int(np.argmax(post_gy[near_idx]))
+            else:
+                pk_rel = int(np.argmin(post_gy[near_idx]))
+            peak_idx_in_post = int(near_idx[pk_rel])
+            peak = float(post_gy[peak_idx_in_post])
+            overshoot = (peak - target) if step_mag > 0 else (target - peak)
+            peak_idx_abs = e + 1 + peak_idx_in_post
         else:
-            overshoot = float(target - np.min(seg_gy))
+            peak = float(target)
+            overshoot = 0.0
+            peak_idx_abs = e
         overshoot_pct = overshoot / abs(step_mag) * 100.0
+        peak_normalized = (peak - baseline) / step_mag  # 1.0 = perfect, >1 = overshoot
 
-        rise_time = _rise_time(gy[win_start:win_end], baseline, target, fs)
+        # 10-90% rise time (ms)
+        rise_time_s = _rise_time(win_gy, baseline, target, fs)
+        rise_time_ms = rise_time_s * 1000.0
 
-        seg_t, seg_sp, seg_gy2 = _decimate(
-            t[win_start:win_end] - t[e], sp[win_start:win_end], gy[win_start:win_end])
+        # Latency: time from step edge to gyro crossing 10% of the step (ms)
+        latency_s = _latency(win_gy, e_rel, baseline, step_mag, fs)
+        latency_ms = latency_s * 1000.0 if latency_s is not None else 0.0
+
+        # Peak time (ms from edge)
+        peak_time_ms = (peak_idx_abs - e) / fs * 1000.0
+
+        settle_band = max(abs(step_mag) * 0.10, 5.0)
+        settle_time_s = _settle_time(post_gy, target, settle_band, fs)
+
+        # Resample window data onto the common grid for averaging & plotting
+        seg_t_list, seg_sp_list, seg_gy_list = _resample_window(
+            win_t, win_sp, win_gy)
 
         steps.append({
             "t0": float(t[e]),
             "step_mag": float(step_mag),
+            "baseline": float(baseline),
+            "target": float(target),
             "overshoot_pct": float(overshoot_pct),
-            "rise_time_s": float(rise_time),
-            "data": {"t": seg_t, "setpoint": seg_sp, "gyro": seg_gy2},
+            "peak_normalized": float(peak_normalized),
+            "rise_time_s": float(rise_time_s),
+            "rise_time_ms": float(rise_time_ms),
+            "latency_ms": float(latency_ms),
+            "peak_time_ms": float(peak_time_ms),
+            "settle_time_s": settle_time_s,
+            "data": {"t": seg_t_list, "setpoint": seg_sp_list, "gyro": seg_gy_list},
         })
         used_until = win_end
         if len(steps) >= max_steps:
             break
     return steps
+
+
+def _latency(gy: np.ndarray, edge_idx: int, baseline: float, step: float,
+             fs: float) -> Optional[float]:
+    """Time (s) from step edge to gyro reaching 10% of the step amplitude."""
+    if gy.size == 0 or fs <= 0 or abs(step) < 1e-6:
+        return None
+    thresh = baseline + 0.1 * step
+    post = gy[edge_idx:]
+    if step > 0:
+        cross = np.flatnonzero(post >= thresh)
+    else:
+        cross = np.flatnonzero(post <= thresh)
+    if cross.size == 0:
+        return None
+    return float(cross[0]) / fs
 
 
 def _rise_time(gy: np.ndarray, baseline: float, target: float, fs: float) -> float:
@@ -374,11 +522,28 @@ def _rise_time(gy: np.ndarray, baseline: float, target: float, fs: float) -> flo
     return (t90 - t10) / fs
 
 
-def _decimate(t: np.ndarray, sp: np.ndarray, gy: np.ndarray,
-              max_pts: int = 400):
-    """Uniform stride decimation of a step window for the frontend."""
-    n = t.shape[0]
-    if n <= max_pts:
-        return t.tolist(), sp.tolist(), gy.tolist()
-    idx = np.linspace(0, n - 1, max_pts).astype(int)
-    return t[idx].tolist(), sp[idx].tolist(), gy[idx].tolist()
+def _settle_time(gy: np.ndarray, target: float, band: float, fs: float) -> Optional[float]:
+    """Time (s) from the step edge for gyro to enter and stay within ±band of target.
+
+    Returns None when the response never settles inside the observed window.
+    """
+    if gy.size == 0 or fs <= 0:
+        return None
+    outside = np.abs(gy - target) > band
+    if not outside.any():
+        return 0.0
+    last_out = int(np.flatnonzero(outside)[-1])
+    if last_out >= gy.size - 1:
+        return None
+    return (last_out + 1) / fs
+
+
+def _resample_window(t: np.ndarray, sp: np.ndarray, gy: np.ndarray):
+    """Resample a step window onto a uniform ms grid (for averaging & plotting)."""
+    t_grid = np.arange(-_STEP_T_PRE_MS, _STEP_T_POST_MS + _STEP_T_DT_MS * 0.5,
+                       _STEP_T_DT_MS) / 1000.0
+    if t.size == 0:
+        return t_grid.tolist(), [None] * t_grid.size, [None] * t_grid.size
+    sp_i = np.interp(t_grid, t, sp, left=np.nan, right=np.nan)
+    gy_i = np.interp(t_grid, t, gy, left=np.nan, right=np.nan)
+    return t_grid.tolist(), sp_i.tolist(), gy_i.tolist()
